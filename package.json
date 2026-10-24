@@ -1,0 +1,26 @@
+{
+  "name": "tridha-consulting",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "consulting.tridha.net landing page and lead API",
+  "scripts": {
+    "dev": "vercel dev",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "sheet-headers": "tsx scripts/sheet-headers.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "google-auth-library": "^11.3.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

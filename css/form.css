@@ -39,6 +39,8 @@
 .trd-phone .trd-select { width: 150px; flex: none; }
 @media (max-width: 480px) { .trd-phone .trd-select { width: 120px; } }
 .trd-error { min-height: 20px; margin: 6px 0 0; font-size: 13px; color: #d92d20; }
+.trd-error.is-hint { color: #475467; }
+.trd-suggest { padding: 0; border: 0; background: none; font: inherit; color: #155eef; text-decoration: underline; cursor: pointer; }
 .trd-submit-error { margin: 12px 0 0; font-size: 13px; color: #d92d20; }
 .trd-submit-error a { color: inherit; text-decoration: underline; }
 

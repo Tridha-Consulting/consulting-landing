@@ -165,7 +165,7 @@
     backBtn.addEventListener('click', function () { if (!busy && stepIndex > 0) showStep(stepIndex - 1); });
     form.addEventListener('submit', onSubmit);
     FIELD_ORDER.forEach(function (k) {
-      inputs[k].addEventListener('input', function () { setError(k, ''); submitErr.textContent = ''; });
+      inputs[k].addEventListener('input', function () { setError(k, ''); submitErr.textContent = ''; if (k === 'email') keptEmail = null; });
     });
     overlay.addEventListener('keydown', trapTab);
     showStep(0, true);
@@ -173,6 +173,7 @@
 
   function setError(k, msg) {
     errs[k].textContent = msg;
+    errs[k].classList.remove('is-hint');
     if (msg) inputs[k].setAttribute('aria-invalid', 'true'); else inputs[k].removeAttribute('aria-invalid');
   }
 
@@ -200,10 +201,36 @@
     return !msg;
   }
 
+  /* Typo advice for the email step. Returns true when a suggestion was shown (caller must not advance).
+     The address the user has already been asked about is remembered so pressing Next again keeps it. */
+  var keptEmail = null;
+  function emailHintShown() {
+    var v = inputs.email.value.trim();
+    if (v === keptEmail || typeof window.trdSuggestEmail !== 'function') return false;
+    var s;
+    try { s = window.trdSuggestEmail(v); } catch (e) { return false; }
+    if (!s || s === v) return false;
+    keptEmail = v;
+    var btn = el('button', { type: 'button', class: 'trd-suggest', text: s });
+    btn.addEventListener('click', function () {
+      inputs.email.value = s;
+      setError('email', '');
+      if (!busy && !sent) showStep(stepIndex + 1);
+    });
+    errs.email.textContent = '';
+    errs.email.classList.add('is-hint');
+    errs.email.appendChild(document.createTextNode('Did you mean '));
+    errs.email.appendChild(btn);
+    errs.email.appendChild(document.createTextNode('?'));
+    inputs.email.focus();
+    return true;
+  }
+
   function onSubmit(e) {
     e.preventDefault();
     if (busy || sent) return;
     if (!stepValid(stepIndex)) return;
+    if (FIELD_ORDER[stepIndex] === 'email' && emailHintShown()) return;
     if (stepIndex < steps.length - 1) { showStep(stepIndex + 1); return; }
     for (var i = 0; i < steps.length - 1; i++) {
       if (!stepValid(i)) { showStep(i); return; }

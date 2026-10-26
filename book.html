@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Book your call | Tridha</title>
+<meta name="robots" content="noindex">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,340;0,8..60,380;1,8..60,400&family=Geist:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="css/site.css">
+<link rel="stylesheet" href="css/form.css">
+<script>
+/* Never-blank guard: if js/booking.js has not replaced the static placeholder within 8s, or fails to load, say how to reach us. */
+(function () {
+  'use strict';
+  function showStatic() {
+    var host = document.querySelector('[data-trd-booking]');
+    if (!host) { document.addEventListener('DOMContentLoaded', showStatic); return; }
+    if (!host.querySelector('[data-trd-static]')) return;
+    var c = (window.TRIDHA_CONFIG && window.TRIDHA_CONFIG.FALLBACK_CONTACT) || 'contact@tridha.net';
+    var p = document.createElement('p');
+    p.appendChild(document.createTextNode("Online booking isn't available right now. Email us at "));
+    if (/@/.test(c)) { var a = document.createElement('a'); a.href = 'mailto:' + c; a.textContent = c; p.appendChild(a); }
+    else p.appendChild(document.createTextNode(c));
+    p.appendChild(document.createTextNode(" and we'll set up a call."));
+    var box = document.createElement('div');
+    box.className = 'trd-fallback';
+    box.setAttribute('role', 'status');
+    box.appendChild(p);
+    host.textContent = '';
+    host.appendChild(box);
+  }
+  window.trdBookStaticFallback = showStatic;
+  setTimeout(showStatic, 8000);
+})();
+</script>
+<script src="js/config.js" defer></script>
+<script src="js/track.js" defer></script>
+<script src="js/booking.js" defer onerror="trdBookStaticFallback()"></script>
+</head>
+<body>
+<div class="trd-lp">
+
+  <header class="lp-header">
+    <div class="logo">Tridha</div>
+  </header>
+
+  <main>
+    <section class="section paper">
+      <div class="wrap">
+        <h1 class="display-l serif">Book your call</h1>
+        <div class="trd-book-page" data-trd-booking>
+          <div class="trd-loading" role="status" data-trd-static>Loading the calendar</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+</div>
+</body>
+</html>

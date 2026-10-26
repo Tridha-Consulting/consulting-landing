@@ -66,3 +66,31 @@
 .trd-thanks:focus { outline: none; }
 .trd-hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
 .trd-ts { margin-top: 12px; }
+
+/* Booking state: the card widens to hold Cal's inline embed (js/booking.js). */
+.trd-overlay.has-booking { align-items: flex-start; }
+.trd-card.is-booking { width: 1000px; margin: auto; padding: 20px 16px 16px; }
+@media (max-width: 480px) {
+  .trd-overlay.has-booking { padding: 8px; }
+  .trd-card.is-booking { width: 100%; border-width: 4px; padding: 16px 8px 8px; }
+}
+.trd-booking-title { margin: 0 32px 12px 0; font-size: 17px; font-weight: 500; color: #101828; }
+.trd-booking-title:focus { outline: none; }
+.trd-booking-title[hidden] { display: none; }
+.trd-embed { width: 100%; }
+.trd-embed.is-pending { height: 0; overflow: hidden; }
+.trd-loading {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  min-height: 160px; font-size: 15px; color: #475467;
+}
+.trd-fallback { padding: 20px 8px; text-align: center; font-size: 16px; color: #101828; }
+.trd-fallback:focus { outline: none; }
+.trd-fallback p { margin: 0 0 12px; }
+.trd-fallback a { color: #155eef; text-decoration: underline; }
+
+/* /book page: the embed sits in a white panel under the shared header. */
+.trd-book-page {
+  max-width: 1000px; margin: 24px 0 0; padding: 12px; background: #fff; border-radius: 8px;
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 14px; line-height: 1.5; color: #344054;
+}
+.trd-book-page *, .trd-book-page *::before, .trd-book-page *::after { box-sizing: border-box; }

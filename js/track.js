@@ -3,6 +3,7 @@
   'use strict';
   var C = window.TRIDHA_CONFIG || {};
   var fired = false;
+  var bookedFired = false;
 
   function addScript(src) {
     var s = document.createElement('script');
@@ -86,5 +87,16 @@
     } catch (e) { /* ignore */ }
   }
 
-  window.track = { lead: lead };
+  /* A call was booked on the Cal.com embed. Google Ads and LinkedIn have no booking conversion configured, so they stay silent. */
+  function booked() {
+    if (bookedFired) return;
+    bookedFired = true;
+    try { if (C.META_PIXEL_ID && window.fbq) window.fbq('track', 'Schedule'); } catch (e) { /* ignore */ }
+    try { if (C.GA4_ID) window.gtag('event', 'book_call'); } catch (e) { /* ignore */ }
+    try {
+      if (C.X_PIXEL_ID && C.X_BOOKED_EVENT_ID && window.twq) window.twq('event', C.X_BOOKED_EVENT_ID, {});
+    } catch (e) { /* ignore */ }
+  }
+
+  window.track = { lead: lead, booked: booked };
 })();

@@ -112,7 +112,7 @@
 
   /* ---------- modal state ---------- */
   var overlay, card, form, closeBtn, nextBtn, backBtn, submitErr, lastTrigger, root;
-  var inputs = {}, errs = {}, steps = [], stepIndex = 0, busy = false, sent = false;
+  var inputs = {}, errs = {}, steps = [], stepIndex = 0, busy = false, sent = false, doneEl = null;
   var tsToken = '', tsLoaded = false, tsWidgetId = null;
   var FIELD_ORDER = ['fullName', 'email', 'phone'];
 
@@ -309,7 +309,10 @@
         credentials: 'same-origin'
       });
     }).then(function (res) {
-      if (res.ok) { success(); return; }
+      if (res.ok) {
+        /* The lead is saved at this point: a body that cannot be read only costs the booking prefill. */
+        return res.json().then(function (d) { return d && d.leadId; }, function () { return ''; }).then(success);
+      }
       if (res.status === 400) {
         return res.json().then(function (data) {
           if (!showServerFieldErrors(data)) throw new Error('HTTP 400');
@@ -342,13 +345,71 @@
     return true;
   }
 
-  function success() {
+  function showThanks() {
+    var msg = el('div', { class: 'trd-thanks', role: 'status', tabindex: '-1', text: CFG.THANK_YOU_TEXT || 'Thank you.' });
+    card.appendChild(msg);
+    doneEl = msg;
+    msg.focus();
+  }
+
+  /* With CAL_LINK set (and js/booking.js loaded) the card turns into the Cal.com calendar, prefilled and tagged
+     with the saved lead's id. Returns false when that is not possible so the caller shows the thank-you. */
+  function showBooking(leadId) {
+    if (!CFG.CAL_LINK || !window.trdBooking || typeof window.trdBooking.mount !== 'function') return false;
+    var title = el('p', { class: 'trd-booking-title', tabindex: '-1', text: 'Pick a time for your call' });
+    var host = el('div', { class: 'trd-booking-host' });
+    var wrap = el('div', { class: 'trd-booking' }, [title, host]);
+    card.appendChild(wrap);
+    card.classList.add('is-booking');
+    overlay.classList.add('has-booking');
+    var started = false;
+    try {
+      started = window.trdBooking.mount(host, {
+        name: inputs.fullName.value.trim(),
+        email: inputs.email.value.trim(),
+        phone: normalisePhone(inputs.dial.value, inputs.phone.value),
+        leadId: leadId ? String(leadId) : ''
+      }, {
+        /* The calendar did not render: the card reverts to thank-you sizing and wording until/unless it does. */
+        onFallback: function () {
+          var fb = host.querySelector('.trd-fallback');
+          var hadFocus = document.activeElement === title;
+          title.hidden = true;
+          card.classList.remove('is-booking');
+          overlay.classList.remove('has-booking');
+          if (fb) { doneEl = fb; if (hadFocus) fb.focus(); }
+        },
+        onReady: function (info) {
+          title.hidden = false;
+          card.classList.add('is-booking');
+          overlay.classList.add('has-booking');
+          doneEl = title;
+          if (info && info.focusWasInFallback) title.focus();
+        },
+        onBooked: function () {
+          if (title.parentNode) title.parentNode.removeChild(title);
+          card.classList.remove('is-booking');
+          overlay.classList.remove('has-booking');
+          doneEl = host.querySelector('.trd-thanks');
+        }
+      }, { fallbackText: CFG.THANK_YOU_TEXT || 'Thank you.' });
+    } catch (e) { started = false; }
+    if (!started) {
+      card.removeChild(wrap);
+      card.classList.remove('is-booking');
+      overlay.classList.remove('has-booking');
+      return false;
+    }
+    doneEl = title;
+    title.focus();
+    return true;
+  }
+
+  function success(leadId) {
     sent = true;
     busy = false;
-    var msg = el('div', { class: 'trd-thanks', role: 'status', tabindex: '-1', text: CFG.THANK_YOU_TEXT || 'Thank you.' });
     card.removeChild(form);
-    card.appendChild(msg);
-    msg.focus();
+    if (!showBooking(leadId)) showThanks();
     try { if (window.track && window.track.lead) window.track.lead(); } catch (e) { /* tracking must never break the flow */ }
   }
 
@@ -357,7 +418,7 @@
      thank-you state swap content. The trap is bound to the overlay, which is never replaced. */
   function focusables() {
     return Array.prototype.filter.call(
-      overlay.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]):not([tabindex="-1"]), select:not([disabled])'),
+      overlay.querySelectorAll('a[href], button:not([disabled]), iframe, input:not([disabled]):not([tabindex="-1"]), select:not([disabled])'),
       function (n) { return n.getClientRects().length > 0 && window.getComputedStyle(n).visibility !== 'hidden'; }
     );
   }
@@ -378,7 +439,7 @@
     overlay.classList.add('is-open');
     document.body.style.overflow = 'hidden';
     if (root) root.setAttribute('inert', '');
-    if (sent) { var t = card.querySelector('.trd-thanks'); if (t) t.focus(); }
+    if (sent) { if (doneEl) doneEl.focus(); }
     else focusStep();
   }
 

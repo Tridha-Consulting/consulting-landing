@@ -38,8 +38,6 @@
 .trd-phone { display: flex; gap: 8px; }
 .trd-phone .trd-select { width: 150px; flex: none; }
 @media (max-width: 480px) { .trd-phone .trd-select { width: 120px; } }
-.trd-note { margin: 8px 0 0; font-size: 12px; color: #667085; }
-.trd-note a { color: #155eef; }
 .trd-error { min-height: 20px; margin: 6px 0 0; font-size: 13px; color: #d92d20; }
 .trd-submit-error { margin: 12px 0 0; font-size: 13px; color: #d92d20; }
 .trd-submit-error a { color: inherit; text-decoration: underline; }

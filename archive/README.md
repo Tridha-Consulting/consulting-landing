@@ -6,6 +6,7 @@ Source of truth for the rebuild. Synamate subscription had lapsed at capture tim
 |---|---|
 | consulting-live.html | Landing page, server-rendered by GHL. The page body is one custom-code block (design tokens, all sections, CSS). |
 | apply-live.html | /apply — GHL booking page (c-calendar element). Copy is fetched client-side and is NOT in this file. At capture it rendered a blank white page for 30s+ — the "white screen" users saw. |
+| survey-live.html | The opt-in survey widget (`W5K6iUb4sMSdsXIYaDgQ`) as GHL still served it on 2026-10-26. Its "Privacy Policy" link pointed at `https://www.example.com`; its thank-you text was "Thank you for taking the time to complete this survey." |
 | tridha-home.html | tridha.net homepage, for design-system reference. |
 | hero-poster.png | Hero video poster frame. |
 | live-*.jpg | Screenshots at capture time. |

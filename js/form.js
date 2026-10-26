@@ -137,15 +137,8 @@
     var tel = el('input', { class: 'trd-input', id: uid + '-phone', type: 'tel', name: 'phone', autocomplete: 'tel-national', inputmode: 'tel', placeholder: 'Phone number', required: '' });
     inputs.dial = sel;
 
-    var note = el('p', { class: 'trd-note' });
-    note.appendChild(document.createTextNode('By continuing you agree to our '));
-    if (CFG.PRIVACY_URL) note.appendChild(el('a', { href: CFG.PRIVACY_URL, target: '_blank', rel: 'noopener', text: 'Privacy Policy' }));
-    else note.appendChild(document.createTextNode('Privacy Policy'));
-    note.appendChild(document.createTextNode('.'));
-
     var s1 = field('fullName', 'Full Name *', name);
     var s2 = field('email', 'Email *', email);
-    s2.insertBefore(note, errs.email);
     var s3 = field('phone', 'Phone *', tel, el('div', { class: 'trd-phone' }, [sel, tel]));
     s3.appendChild(el('div', { class: 'trd-ts' }));
     steps = [s1, s2, s3];

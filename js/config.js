@@ -2,7 +2,6 @@
 window.TRIDHA_CONFIG = Object.freeze({
   THANK_YOU_TEXT: 'Thank you \u2014 our team will call you shortly.',
   FALLBACK_CONTACT: 'contact@tridha.net',
-  PRIVACY_URL: '',
   TURNSTILE_SITE_KEY: '',
   TAGS_HOSTNAME: 'consulting.tridha.net', // ad tags load only on this host, so local and preview visits never reach the pixels
   META_PIXEL_ID: '',

@@ -28,13 +28,33 @@ export const STATUS = {
   cancelled: 'Cancelled',
 } as const;
 
-/** The one definition of the sheet layout: header text and where each value comes from. */
+/**
+ * The one definition of the sheet layout: header text and where each value comes from.
+ * While the sheet holds no data rows the layout may be reordered freely. Once it does, columns are
+ * only ever appended: reordering would misalign every existing row against the new headers.
+ * Booking columns are filled by /api/cal-webhook; a fresh lead from /api/lead leaves them blank.
+ */
 export const COLUMNS: readonly Column[] = [
   { header: 'Submitted At (IST)', value: (l) => formatIST(l.submittedAt) },
   { header: 'Full Name', value: (l) => l.fullName },
   { header: 'Email', value: (l) => l.email },
   { header: 'Phone', value: (l) => l.phone },
   { header: 'Status', value: () => STATUS.new },
+  { header: 'Call Time (IST)', value: () => '' },
+  // When the booking was made (its BOOKING_CREATED event), as opposed to when the call is.
+  { header: 'Booked At (IST)', value: () => '' },
+  // One column per booking-form answer; lib/cal-booking.ts maps Cal field identifiers to these.
+  { header: 'Designation', value: () => '' },
+  { header: 'Company', value: () => '' },
+  { header: 'Website', value: () => '' },
+  { header: 'Annual Revenue', value: () => '' },
+  { header: 'Budget (3-6 Months)', value: () => '' },
+  { header: 'Bottleneck', value: () => '' },
+  { header: 'Tech Team', value: () => '' },
+  { header: 'Timeline', value: () => '' },
+  { header: 'Decision Maker', value: () => '' },
+  // Booking answers that have no column of their own, plus the cancellation reason.
+  { header: 'Booking Details', value: () => '' },
   { header: 'UTM Source', value: (l) => l.utmSource ?? '' },
   { header: 'UTM Medium', value: (l) => l.utmMedium ?? '' },
   { header: 'UTM Campaign', value: (l) => l.utmCampaign ?? '' },
@@ -48,9 +68,6 @@ export const COLUMNS: readonly Column[] = [
   { header: 'User Agent', value: (l) => l.userAgent },
   { header: 'IP', value: (l) => l.ip },
   { header: 'Lead ID', value: (l) => l.leadId },
-  // Filled by /api/cal-webhook; a fresh lead has not booked yet. Append only, never reorder.
-  { header: 'Call Time (IST)', value: () => '' },
-  { header: 'Booking Details', value: () => '' },
   { header: 'Booking UID', value: () => '' },
   // `createdAt` of the last webhook event applied, so a late or replayed older event is ignored.
   { header: 'Last Event At', value: () => '' },
@@ -81,5 +98,34 @@ export function columnLetter(index: number): string {
   return out;
 }
 
-/** Letter of the last column, so ranges like `A:U` follow the layout instead of hard-coding it. */
+/** Letter of the last column, so ranges like `A:AF` follow the layout instead of hard-coding it. */
 export const LAST_COLUMN_LETTER = columnLetter(HEADERS.length - 1);
+
+/** The sheet's first row is not the header row this code was written against. */
+export class SheetLayoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SheetLayoutError';
+  }
+}
+
+/**
+ * Throws unless `firstRow` is exactly HEADERS (cells trimmed, same length). Writes address cells by
+ * the position of a header, so against a sheet in another layout they would land in the wrong
+ * columns. The message names headers and positions only, never row data: a tab with no header row
+ * has a lead there, so a found header is quoted only when it is one of ours.
+ */
+export function assertSheetLayout(firstRow: readonly string[] | undefined): void {
+  if (!firstRow || firstRow.length === 0) {
+    throw new SheetLayoutError('sheet layout mismatch: the tab has no header row; run npm run sheet-headers and paste it into A1');
+  }
+  const found = firstRow.map((c) => String(c ?? '').trim());
+  const width = Math.max(found.length, HEADERS.length);
+  for (let i = 0; i < width; i++) {
+    if (found[i] === HEADERS[i]) continue;
+    const shown = found[i] === undefined || found[i] === '' ? '(empty)' : HEADERS.includes(found[i]!) ? `"${found[i]}"` : `(other text, ${found[i]!.length} characters)`;
+    throw new SheetLayoutError(
+      `sheet layout mismatch at column ${columnLetter(i)} (position ${i + 1}): expected ${HEADERS[i] === undefined ? '(nothing)' : `"${HEADERS[i]}"`}, found ${shown}; the header row must equal npm run sheet-headers`,
+    );
+  }
+}

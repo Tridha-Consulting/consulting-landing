@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { isHandledTrigger, parseBooking } from '../lib/cal-booking.js';
+import { SheetLayoutError } from '../lib/columns.js';
 
 // Cal.com booking webhooks -> the lead's row in the Sheet. Web-standard handler like api/lead.ts:
 // the raw body is read once because the signature is over the exact bytes Cal sent.
@@ -88,9 +89,15 @@ export async function POST(request: Request): Promise<Response> {
       console.log(JSON.stringify({ event: 'CAL_WEBHOOK_STALE', uid: booking.booking.uid, trigger, reason: out.stale, matchedBy: out.matchedBy, row: out.row, ...(out.warn && { warn: out.warn }) }));
       return json(200, { ok: true, ignored: out.stale });
     }
-    console.log(JSON.stringify({ event: 'CAL_BOOKING_SYNCED', uid: booking.booking.uid, trigger, matchedBy: out.matchedBy, row: out.row, ...(out.warn && { warn: out.warn }) }));
+    console.log(JSON.stringify({ event: 'CAL_BOOKING_SYNCED', uid: booking.booking.uid, trigger, matchedBy: out.matchedBy, row: out.row, ...(out.warn && { warn: out.warn }), ...(out.unmapped && { unmapped: out.unmapped }) }));
     return json(200, { ok: true, matchedBy: out.matchedBy });
   } catch (err) {
+    if (err instanceof SheetLayoutError) {
+      // Nothing was written. Retrying cannot help until the header row is fixed, so 500 with the
+      // payload logged for recovery, like any other misconfiguration.
+      console.error(JSON.stringify({ event: 'CAL_WEBHOOK_MISCONFIGURED', error: err.message, trigger, payload: body.payload }));
+      return json(500, { ok: false, error: 'server_misconfigured' });
+    }
     // 502 makes Cal retry; the full payload is logged for recovery if retries run out.
     console.error(
       JSON.stringify({ event: 'CAL_WEBHOOK_WRITE_FAILED', error: err instanceof Error ? err.message : String(err), trigger, payload: body.payload }),

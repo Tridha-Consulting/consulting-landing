@@ -93,15 +93,54 @@ function flatten(v: unknown): string {
 // Already in their own columns, so repeating them in Booking Details is noise.
 const IDENTITY_FIELDS = new Set(['name', 'email', 'attendeePhoneNumber']);
 
-function responseValue(booking: Booking, key: string): string {
-  return flatten((booking.responses?.[key] as { value?: unknown } | undefined)?.value);
+/**
+ * Cal field identifier (the `responses` key) -> sheet header: the one place that says which
+ * booking-form answer lands in which column. A Map, not an object literal: keys come from the
+ * public booking form, and "constructor" or "__proto__" must not resolve. An identifier missing
+ * here (a typo in Cal) is not lost: it falls through to Booking Details and is logged as unmapped.
+ */
+export const ANSWER_COLUMNS: ReadonlyMap<string, string> = new Map([
+  ['designation', 'Designation'],
+  ['company', 'Company'],
+  ['website', 'Website'],
+  ['revenue', 'Annual Revenue'],
+  ['budget', 'Budget (3-6 Months)'],
+  ['bottleneck', 'Bottleneck'],
+  ['tech_team', 'Tech Team'],
+  ['timeline', 'Timeline'],
+  ['decision_maker', 'Decision Maker'],
+]);
+
+/** Cal may write an identifier with hyphens where we use underscores (tech-team for tech_team). */
+function isAnswerKey(key: string): boolean {
+  return ANSWER_COLUMNS.has(key.replaceAll('-', '_'));
 }
 
-/** One `Label: value` line per non-empty response, plus the cancellation reason on cancel. */
+// Fields Cal adds itself; a custom field outside this set and ANSWER_COLUMNS is worth a log line.
+const BUILTIN_KEYS = new Set(['location', 'notes', 'guests', 'additional_guests', 'rescheduleReason', 'title', 'what_is_this_meeting_about']);
+
+function responseValue(booking: Booking, key: string): string {
+  const responses = booking.responses;
+  if (!responses || !Object.hasOwn(responses, key)) return '';
+  return flatten((responses[key] as { value?: unknown } | null | undefined)?.value);
+}
+
+/** Cuts text to fit a Sheets cell without leaving half of a surrogate pair (an emoji) at the cut. */
+function capCell(all: string): string {
+  if (all.length <= MAX_DETAILS_CHARS) return all;
+  let cut = MAX_DETAILS_CHARS - TRUNCATED.length;
+  if (/[\uD800-\uDBFF]/.test(all[cut - 1] ?? '')) cut--;
+  return all.slice(0, cut) + TRUNCATED;
+}
+
+/**
+ * One `Label: value` line per non-empty response that has no column of its own, plus the
+ * cancellation reason on cancel.
+ */
 export function bookingDetails(booking: Booking, trigger: BookingTrigger): string {
   const lines: string[] = [];
   for (const [key, entry] of Object.entries(booking.responses ?? {})) {
-    if (IDENTITY_FIELDS.has(key)) continue;
+    if (IDENTITY_FIELDS.has(key) || isAnswerKey(key)) continue;
     const e = (entry ?? {}) as { label?: unknown; value?: unknown };
     const value = key === 'location' ? locationText(e.value) : flatten(e.value);
     if (!value) continue;
@@ -109,12 +148,30 @@ export function bookingDetails(booking: Booking, trigger: BookingTrigger): strin
   }
   const reason = booking.cancellationReason?.trim();
   if (trigger === 'BOOKING_CANCELLED' && reason) lines.push(`Cancellation reason: ${reason}`);
-  const all = lines.join('\n');
-  if (all.length <= MAX_DETAILS_CHARS) return all;
-  let cut = MAX_DETAILS_CHARS - TRUNCATED.length;
-  // Never leave half of a surrogate pair (an emoji) at the cut.
-  if (/[\uD800-\uDBFF]/.test(all[cut - 1] ?? '')) cut--;
-  return all.slice(0, cut) + TRUNCATED;
+  return capCell(lines.join('\n'));
+}
+
+export interface AnswerCell {
+  header: string;
+  value: string;
+}
+
+/** The mapped booking-form answers that carry a value, one per column. Empty answers are omitted. */
+export function bookingAnswers(booking: Booking): AnswerCell[] {
+  const out: AnswerCell[] = [];
+  for (const [key, header] of ANSWER_COLUMNS) {
+    // The underscore spelling wins when both carry a value.
+    const value = capCell(responseValue(booking, key) || responseValue(booking, key.replaceAll('_', '-')));
+    if (value) out.push({ header, value });
+  }
+  return out;
+}
+
+/** Custom response keys that carry a value but map to no column, so the owner can spot a mistyped identifier. */
+export function unmappedKeys(booking: Booking): string[] {
+  return Object.entries(booking.responses ?? {})
+    .filter(([key, entry]) => !IDENTITY_FIELDS.has(key) && !BUILTIN_KEYS.has(key) && !isAnswerKey(key) && flatten((entry as { value?: unknown } | null)?.value) !== '')
+    .map(([key]) => key);
 }
 
 export type MatchedBy = 'leadId' | 'uid' | 'email' | 'appended';
@@ -123,6 +180,10 @@ export interface BookingCells {
   status: string;
   callTime: string;
   details: string;
+  /** Mapped booking-form answers with a value; an empty answer is never written, so it cannot blank a cell. */
+  answers: AnswerCell[];
+  /** First booking time: set on BOOKING_CREATED only, and on update only when the cell is empty; '' means the cell is left alone. */
+  bookedAt: string;
   uid: string;
   /** Envelope `createdAt` as received; '' when the event carried none (the cell is then left alone). */
   lastEventAt: string;
@@ -139,6 +200,8 @@ export type Plan = (
 ) & {
   /** Set when a timestamp was ignored for being more than a day ahead of the server clock. */
   warn?: string;
+  /** Custom response keys with a value but no column (see unmappedKeys); absent when there are none. */
+  unmapped?: string[];
 };
 
 const COL = {
@@ -146,6 +209,7 @@ const COL = {
   leadId: columnIndex('Lead ID'),
   uid: columnIndex('Booking UID'),
   lastEventAt: columnIndex('Last Event At'),
+  bookedAt: columnIndex('Booked At (IST)'),
 };
 
 const ISO_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/;
@@ -204,10 +268,15 @@ export function planBooking(rows: string[][], trigger: BookingTrigger, booking: 
     status: statusFor(trigger),
     callTime: formatIST(new Date(booking.startTime)),
     details: bookingDetails(booking, trigger),
+    answers: bookingAnswers(booking),
+    // A usable envelope time says when the booking was made; otherwise the server clock does.
+    bookedAt: trigger === 'BOOKING_CREATED' ? formatIST(event.ms !== undefined ? new Date(event.ms) : now) : '',
     uid: booking.uid.trim(),
     // Stored only when usable for ordering, so a junk createdAt never lands in the sheet.
     lastEventAt: event.ms !== undefined ? eventAt! : '',
   };
+  const unmappedList = unmappedKeys(booking);
+  const unmapped = unmappedList.length ? unmappedList : undefined;
   const warns: string[] = [];
   if (event.future) warns.push('event_createdAt_in_future');
 
@@ -223,7 +292,7 @@ export function planBooking(rows: string[][], trigger: BookingTrigger, booking: 
     if (applied.future) warns.push('row_last_event_in_future');
     const warn = warns.length ? warns.join(',') : undefined;
     const stale = (reason: 'event' | 'cancellation'): Plan => ({
-      action: 'stale', row: found.index + 1, matchedBy: found.by, reason, warn,
+      action: 'stale', row: found.index + 1, matchedBy: found.by, reason, warn, unmapped,
     });
     // A late or replayed event must not revert newer state (if both timestamps are usable).
     if (event.ms !== undefined && applied.ms !== undefined && event.ms < applied.ms) return stale('event');
@@ -231,7 +300,10 @@ export function planBooking(rows: string[][], trigger: BookingTrigger, booking: 
     // mark a live one Cancelled. This holds whatever the timestamps say.
     const current = cell(row, COL.uid);
     if (trigger === 'BOOKING_CANCELLED' && current && current !== cells.uid) return stale('cancellation');
-    return { action: 'update', row: found.index + 1, matchedBy: found.by, cells, warn };
+    // Booked At records the first booking and never moves: a filled cell is left alone, so a replay
+    // or a re-book after a cancel keeps the original time.
+    const keep = cell(row, COL.bookedAt) !== '';
+    return { action: 'update', row: found.index + 1, matchedBy: found.by, cells: keep ? { ...cells, bookedAt: '' } : cells, warn, unmapped };
   }
 
   const lead: LeadRow = {
@@ -246,8 +318,10 @@ export function planBooking(rows: string[][], trigger: BookingTrigger, booking: 
   const values = toRow(lead);
   values[columnIndex('Status')] = cells.status;
   values[columnIndex('Call Time (IST)')] = cells.callTime;
+  values[columnIndex('Booked At (IST)')] = cells.bookedAt;
   values[columnIndex('Booking Details')] = cells.details;
   values[columnIndex('Booking UID')] = cells.uid;
   values[COL.lastEventAt] = cells.lastEventAt;
-  return { action: 'append', matchedBy: 'appended', values, warn: warns.length ? warns.join(',') : undefined };
+  for (const a of cells.answers) values[columnIndex(a.header)] = a.value;
+  return { action: 'append', matchedBy: 'appended', values, warn: warns.length ? warns.join(',') : undefined, unmapped };
 }

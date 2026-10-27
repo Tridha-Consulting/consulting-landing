@@ -1,4 +1,4 @@
-import { LAST_COLUMN_LETTER, columnIndex, columnLetter } from './columns.js';
+import { LAST_COLUMN_LETTER, assertSheetLayout, columnIndex, columnLetter } from './columns.js';
 import { planBooking, type Booking, type BookingTrigger, type MatchedBy } from './cal-booking.js';
 import { env } from './env.js';
 import { WRITE_DEADLINE_MS, sheetsRequest, withDeadline } from './sheets-client.js';
@@ -11,6 +11,8 @@ export interface SyncOutcome {
   stale?: 'stale_event' | 'stale_cancellation';
   /** A timestamp was ignored as too far in the future; see Plan.warn. */
   warn?: string;
+  /** Custom booking-form keys with a value but no column; see Plan.unmapped. */
+  unmapped?: string[];
 }
 
 /** A1 tab reference, quoted so tab names with spaces or punctuation resolve. */
@@ -36,6 +38,8 @@ export function syncBooking(
       },
       signal,
     );
+    // Refuse before planning: every write below addresses cells by header position.
+    assertSheetLayout(read.values?.[0]);
     const plan = planBooking(read.values ?? [], trigger, booking, now, eventAt);
 
     if (plan.action === 'stale') {
@@ -54,7 +58,7 @@ export function syncBooking(
         signal,
       );
       const m = /!\$?[A-Z]+(\d+)/.exec(res.updates?.updatedRange ?? '');
-      return { matchedBy: 'appended', row: m ? Number(m[1]) : null, warn: plan.warn };
+      return { matchedBy: 'appended', row: m ? Number(m[1]) : null, warn: plan.warn, unmapped: plan.unmapped };
     }
 
     // One batchUpdate touches only the booking cells, so a setter's edits to the rest of
@@ -77,11 +81,15 @@ export function syncBooking(
             at('Booking UID', cells.uid),
             // Left alone when the event carried no createdAt, so the stored order marker survives.
             ...(cells.lastEventAt ? [at('Last Event At', cells.lastEventAt)] : []),
+            // Only a BOOKING_CREATED sets this, and only non-empty answers are written, so a later
+            // event that omits them leaves the stored values alone.
+            ...(cells.bookedAt ? [at('Booked At (IST)', cells.bookedAt)] : []),
+            ...cells.answers.map((a) => at(a.header, a.value)),
           ],
         },
       },
       signal,
     );
-    return { matchedBy: plan.matchedBy, row: plan.row, warn: plan.warn };
+    return { matchedBy: plan.matchedBy, row: plan.row, warn: plan.warn, unmapped: plan.unmapped };
   });
 }

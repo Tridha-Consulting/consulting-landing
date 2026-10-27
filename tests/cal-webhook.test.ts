@@ -1,6 +1,7 @@
 import { createHmac, generateKeyPairSync } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { HEADERS, toRow, type LeadRow } from '../lib/columns.js';
+import { HEADERS, LAST_COLUMN_LETTER, columnLetter, toRow, type LeadRow } from '../lib/columns.js';
+import { ANSWER_COLUMNS, parseBooking, planBooking, type Booking } from '../lib/cal-booking.js';
 import { readJsonResponse } from './helpers.js';
 
 // Real JWT + real gaxios; only the network is stubbed, with an in-memory sheet behind it so a
@@ -76,7 +77,7 @@ function fakeSheets(c: Call): Response {
     expect(c.url.searchParams.get('valueInputOption')).toBe('RAW');
     const { values } = c.body as { values: string[][] };
     sheet.push(values[0]!);
-    return Response.json({ updates: { updatedRange: `'${tab.replace(/'/g, "''")}'!A${sheet.length}:V${sheet.length}` } });
+    return Response.json({ updates: { updatedRange: `'${tab.replace(/'/g, "''")}'!A${sheet.length}:${LAST_COLUMN_LETTER}${sheet.length}` } });
   }
   throw new Error(`unexpected request ${c.method} ${rest}`);
 }
@@ -259,7 +260,7 @@ describe('ignored triggers', () => {
 });
 
 describe('booking created', () => {
-  it('matches by metadata.leadId and fills the four booking cells', async () => {
+  it('matches by metadata.leadId and fills the booking cells', async () => {
     sheet.push(leadRow({ 'Lead ID': 'lead-1' }), leadRow({ 'Lead ID': 'lead-2', Email: 'other@example.com' }));
     const h = await loadHandler();
     const out = await post(h, calRequest(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-2', videoCallUrl: 'https://meet' } }))));
@@ -270,7 +271,8 @@ describe('booking created', () => {
     const row = sheet[2]!;
     expect(row[COL['Status']!]).toBe('Booked');
     expect(row[COL['Call Time (IST)']!]).toBe('2026-11-02 15:00:00');
-    expect(row[COL['Booking Details']!]).toBe('Company: Rao & Co');
+    expect(row[COL['Company']!]).toBe('Rao & Co');
+    expect(row[COL['Booking Details']!]).toBe('');
     expect(row[COL['Booking UID']!]).toBe('bk_1');
     expect(row[COL['Email']!]).toBe('other@example.com');
     expect(row[COL['Lead ID']!]).toBe('lead-2');
@@ -285,7 +287,7 @@ describe('booking created', () => {
     await post(h, calRequest(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-1' } }))));
     expect(calls.map((c) => c.method)).toEqual(['GET', 'POST']);
     expect(calls[0]!.url.searchParams.get('majorDimension')).toBe('ROWS');
-    expect(decodeURIComponent(calls[0]!.url.pathname)).toContain("/values/'Leads'!A:V");
+    expect(decodeURIComponent(calls[0]!.url.pathname)).toContain(`/values/'Leads'!A:${LAST_COLUMN_LETTER}`);
   });
 
   it('matches by email, case-insensitive and trimmed, picking the bottom-most of two rows', async () => {
@@ -409,7 +411,8 @@ describe('booking cancelled', () => {
     const row = sheet[1]!;
     expect(row[COL['Status']!]).toBe('Cancelled');
     expect(row[COL['Call Time (IST)']!]).toBe('2026-11-02 15:00:00');
-    expect(row[COL['Booking Details']!]).toBe('Company: Rao & Co\nCancellation reason: Clash with board meeting');
+    expect(row[COL['Company']!]).toBe('Rao & Co');
+    expect(row[COL['Booking Details']!]).toBe('Cancellation reason: Clash with board meeting');
     expect(row[COL['Booking UID']!]).toBe('bk_1');
   });
 
@@ -731,14 +734,14 @@ describe('booking details limits and labels', () => {
               guests: { label: 'additional_guests', value: ['a@x.co', 'b@x.co'] },
               notes: { label: 'notes', value: 'Hello' },
               rescheduleReason: { label: 'rescheduleReason', value: 'Travelling' },
-              company: { label: 'company', value: 'Rao & Co' },
+              widget: { label: 'widget', value: 'Rao & Co' },
             },
           }),
         ),
       ),
     );
     expect(sheet[1]![COL['Booking Details']!]).toBe(
-      ['Location: Cal Video', 'Guests: a@x.co, b@x.co', 'Notes: Hello', 'Reschedule reason: Travelling', 'company: Rao & Co'].join('\n'),
+      ['Location: Cal Video', 'Guests: a@x.co, b@x.co', 'Notes: Hello', 'Reschedule reason: Travelling', 'widget: Rao & Co'].join('\n'),
     );
   });
 
@@ -802,7 +805,7 @@ describe('tab names and deadlines', () => {
   it("doubles an apostrophe in the tab name in every range (read, update, append)", async () => {
     const h = await loadHandler({ tab: "Rao's Leads" });
     await post(h, calRequest(event('BOOKING_CREATED', booking(), '2026-10-26T06:01:00.000Z')));
-    expect(decodeURIComponent(calls[0]!.url.pathname)).toContain("/values/'Rao''s Leads'!A:V");
+    expect(decodeURIComponent(calls[0]!.url.pathname)).toContain(`/values/'Rao''s Leads'!A:${LAST_COLUMN_LETTER}`);
     expect(decodeURIComponent(calls[1]!.url.pathname)).toContain("/values/'Rao''s Leads'!A1:append");
     sheet.push(leadRow());
     sheet.splice(1, 1);
@@ -936,5 +939,386 @@ describe('prototype-named keys, labels and truncation', () => {
     const h = await loadHandler();
     await post(h, calRequest(event('BOOKING_CREATED', booking({ responses: { [key]: { label, value: 'Pricing' } } }))));
     expect(sheet[1]![COL['Booking Details']!]).toBe(expected);
+  });
+});
+
+// One literal table, deliberately not derived from ANSWER_COLUMNS: it pins what the owner types
+// into Cal (identifier) against what the setter reads in the sheet (header).
+const ANSWER_TABLE: [string, string, unknown, string][] = [
+  ['designation', 'Designation', 'Founder', 'Founder'],
+  ['company', 'Company', 'Rao & Co', 'Rao & Co'],
+  ['website', 'Website', 'https://rao.example', 'https://rao.example'],
+  ['revenue', 'Annual Revenue', '₹5 Crores – ₹20 Crores', '₹5 Crores – ₹20 Crores'],
+  ['budget', 'Budget (3-6 Months)', '₹5 Lakhs – ₹15 Lakhs', '₹5 Lakhs – ₹15 Lakhs'],
+  ['bottleneck', 'Bottleneck', ['Lead generation', 'Sales process'], 'Lead generation, Sales process'],
+  ['tech_team', 'Tech Team', 'In-house', 'In-house'],
+  ['timeline', 'Timeline', 'Within a month', 'Within a month'],
+  ['decision_maker', 'Decision Maker', 'Yes, me', 'Yes, me'],
+];
+const ANSWER_HEADERS = ANSWER_TABLE.map((r) => r[1]);
+
+function answerResponses(only?: string): Record<string, unknown> {
+  return Object.fromEntries(ANSWER_TABLE.filter(([id]) => !only || id === only).map(([id, , value]) => [id, { label: id, value }]));
+}
+
+/** Cell references written by the last batchUpdate, without the tab name. */
+function writtenRanges(): string[] {
+  return (calls.at(-1)!.body as { data: { range: string }[] }).data.map((d) => d.range.replace(/^.*!/, ''));
+}
+
+describe('booking answer columns', () => {
+  it('maps exactly the nine owner-final identifiers', () => {
+    expect([...ANSWER_COLUMNS]).toEqual(ANSWER_TABLE.map(([id, header]) => [id, header]));
+  });
+
+  it.each(ANSWER_TABLE)('%s lands in the %s column on update (checkbox arrays joined)', async (id, header, _v, expected) => {
+    sheet.push(leadRow());
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-1' }, responses: answerResponses(id) }))));
+    expect(sheet[1]![COL[header]!]).toBe(expected);
+    for (const other of ANSWER_HEADERS.filter((x) => x !== header)) expect(sheet[1]![COL[other]!] ?? '').toBe('');
+    expect(sheet[1]![COL['Booking Details']!]).toBe('');
+  });
+
+  it.each(ANSWER_TABLE)('%s lands in the %s column on append', async (id, header, _v, expected) => {
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ responses: answerResponses(id) }))));
+    expect(sheet).toHaveLength(2);
+    expect(sheet[1]![COL[header]!]).toBe(expected);
+    for (const other of ANSWER_HEADERS.filter((x) => x !== header)) expect(sheet[1]![COL[other]!]).toBe('');
+    expect(sheet[1]![COL['Booking Details']!]).toBe('');
+  });
+
+  it('a full set of answers fills all nine columns in one batchUpdate and nothing else', async () => {
+    sheet.push(leadRow());
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-1' }, responses: answerResponses() }))));
+    for (const [, header, , expected] of ANSWER_TABLE) expect(sheet[1]![COL[header]!]).toBe(expected);
+    expect(calls.map((c) => c.method)).toEqual(['GET', 'POST']);
+    const cols = ['Status', 'Call Time (IST)', 'Booking Details', 'Booking UID', 'Last Event At', 'Booked At (IST)', ...ANSWER_HEADERS];
+    expect(writtenRanges().sort()).toEqual(cols.map((c) => `${columnLetter(COL[c]!)}2`).sort());
+  });
+
+  it('an empty or missing answer on a later event does not blank the stored answer', async () => {
+    sheet.push(leadRow());
+    const h = await loadHandler();
+    const T = (m: number) => `2026-10-26T06:${String(m).padStart(2, '0')}:00.000Z`;
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ uid: 'bk_A', metadata: { leadId: 'lead-1' }, responses: answerResponses() }), T(1))));
+    const stored = ANSWER_HEADERS.map((x) => sheet[1]![COL[x]!]);
+    expect(stored.every(Boolean)).toBe(true);
+    const answerCells = ANSWER_HEADERS.map((x) => `${columnLetter(COL[x]!)}2`);
+    const answerWrites = () => writtenRanges().filter((r) => answerCells.includes(r));
+
+    // Reschedule whose responses carry only a reason (no answers at all).
+    await post(h, calRequest(event('BOOKING_RESCHEDULED', booking({ uid: 'bk_B', rescheduleUid: 'bk_A', responses: { rescheduleReason: { label: 'Why', value: 'Travelling' } } }), T(2))));
+    expect(sheet[1]![COL['Status']!]).toBe('Rescheduled');
+    expect(answerWrites()).toEqual([]);
+    expect(ANSWER_HEADERS.map((x) => sheet[1]![COL[x]!])).toEqual(stored);
+
+    // Cancel with every answer present but empty.
+    const blank = Object.fromEntries(ANSWER_TABLE.map(([id]) => [id, { label: id, value: id === 'bottleneck' ? [] : '' }]));
+    await post(h, calRequest(event('BOOKING_CANCELLED', booking({ uid: 'bk_B', responses: blank }), T(3))));
+    expect(sheet[1]![COL['Status']!]).toBe('Cancelled');
+    expect(answerWrites()).toEqual([]);
+    expect(ANSWER_HEADERS.map((x) => sheet[1]![COL[x]!])).toEqual(stored);
+
+    // Cancel with no responses key at all.
+    const bare = booking({ uid: 'bk_B' }) as Record<string, unknown>;
+    delete bare.responses;
+    await post(h, calRequest(event('BOOKING_CANCELLED', bare, T(4))));
+    expect(answerWrites()).toEqual([]);
+    expect(ANSWER_HEADERS.map((x) => sheet[1]![COL[x]!])).toEqual(stored);
+  });
+
+  it('a later non-empty answer replaces the stored one', async () => {
+    sheet.push(leadRow({ Company: 'Old Co', 'Booking UID': 'bk_1' }));
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_RESCHEDULED', booking({ uid: 'bk_2', rescheduleUid: 'bk_1', responses: answerResponses('company') }))));
+    expect(sheet[1]![COL['Company']!]).toBe('Rao & Co');
+  });
+
+  it('caps an oversized answer under the 50,000 cell limit', async () => {
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ responses: { website: { label: 'Website', value: 'w'.repeat(52_000) } } }))));
+    const cell = sheet[1]![COL['Website']!]!;
+    expect(cell.length).toBeLessThanOrEqual(45_000);
+    expect(cell.endsWith('… (truncated)')).toBe(true);
+  });
+});
+
+describe('answers without a column', () => {
+  it('a mistyped identifier lands in Booking Details and is reported as unmapped; built-ins are not', async () => {
+    sheet.push(leadRow());
+    const h = await loadHandler();
+    const responses = {
+      name: { label: 'Name', value: 'Asha Rao' },
+      email: { label: 'Email', value: 'asha@example.com' },
+      attendeePhoneNumber: { label: 'Phone', value: '+91' },
+      designation: { label: 'Designation', value: 'Founder' },
+      desgination: { label: 'Designation', value: 'CEO' },
+      tech_tema: { label: 'Tech team', value: ['Yes', 'No'] },
+      emptyone: { label: 'Empty', value: '' },
+      location: { label: 'location', value: 'integrations:daily' },
+      notes: { label: 'notes', value: 'Hi' },
+      guests: { label: 'guests', value: ['g@x.co'] },
+      additional_guests: { label: 'additional_guests', value: ['h@x.co'] },
+      rescheduleReason: { label: 'rescheduleReason', value: 'Busy' },
+      title: { label: 'title', value: 'Strategy call' },
+      what_is_this_meeting_about: { label: 'what_is_this_meeting_about', value: 'Pricing' },
+    };
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-1' }, responses }))));
+    const details = sheet[1]![COL['Booking Details']!]!;
+    expect(details).toContain('Designation: CEO');
+    expect(details).toContain('Tech team: Yes, No');
+    expect(sheet[1]![COL['Designation']!]).toBe('Founder');
+    expect(details).not.toContain('Founder');
+    const synced = JSON.parse(logged(console.log as never, 'CAL_BOOKING_SYNCED')!);
+    expect(synced.unmapped).toEqual(['desgination', 'tech_tema']);
+  });
+
+  it('an unmapped key is reported on append too', async () => {
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ responses: { revnue: { label: 'Revenue', value: 'x' } } }))));
+    expect(sheet[1]![COL['Booking Details']!]).toBe('Revenue: x');
+    expect(JSON.parse(logged(console.log as never, 'CAL_BOOKING_SYNCED')!).unmapped).toEqual(['revnue']);
+  });
+
+  it('logs no unmapped field when every answer has a column', async () => {
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ responses: answerResponses() }))));
+    expect(JSON.parse(logged(console.log as never, 'CAL_BOOKING_SYNCED')!)).not.toHaveProperty('unmapped');
+  });
+
+  it('prototype-named identifiers are not mapped to a column; they fall through to Booking Details', async () => {
+    expect(ANSWER_COLUMNS.get('__proto__')).toBeUndefined();
+    expect(ANSWER_COLUMNS.get('constructor')).toBeUndefined();
+    expect(ANSWER_COLUMNS.has('toString')).toBe(false);
+    const h = await loadHandler();
+    const responses = JSON.parse('{"constructor":{"label":"constructor","value":"c1"},"toString":{"label":"toString","value":"t1"}}');
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ responses }))));
+    const row = sheet[1]!;
+    expect(ANSWER_HEADERS.map((x) => row[COL[x]!])).toEqual(ANSWER_HEADERS.map(() => ''));
+    expect(row[COL['Booking Details']!]).toBe(['constructor: c1', 'toString: t1'].join(String.fromCharCode(10)));
+    expect(JSON.parse(logged(console.log as never, 'CAL_BOOKING_SYNCED')!).unmapped).toEqual(['constructor', 'toString']);
+  });
+
+  it('an own "__proto__" response key (zod drops it on the wire, so built by hand here) is not mapped either', () => {
+    const responses = JSON.parse('{"__proto__":{"label":"__proto__","value":"p1"},"constructor":{"label":"constructor","value":"c1"}}');
+    expect(Object.keys(responses)).toContain('__proto__');
+    const b = { uid: 'bk_p', startTime: '2026-11-02T09:30:00Z', attendees: [{ email: 'p@x.co' }], responses } as Booking;
+    const plan = planBooking([[...HEADERS]], 'BOOKING_CREATED', b, new Date('2026-10-28T10:00:00Z'));
+    expect(plan.action).toBe('append');
+    if (plan.action !== 'append') return;
+    expect(ANSWER_HEADERS.map((x) => plan.values[COL[x]!])).toEqual(ANSWER_HEADERS.map(() => ''));
+    expect(plan.values[COL['Booking Details']!]).toBe(['__proto__: p1', 'constructor: c1'].join(String.fromCharCode(10)));
+    expect(plan.unmapped).toEqual(['__proto__', 'constructor']);
+  });
+});
+describe('Booked At (IST)', () => {
+  const T = (m: number) => `2026-10-26T06:${String(m).padStart(2, '0')}:00.000Z`;
+  const bookedAt = () => sheet[1]![COL['Booked At (IST)']!];
+  const bookedAtCell = () => `${columnLetter(COL['Booked At (IST)']!)}2`;
+
+  it('is the envelope createdAt in IST on BOOKING_CREATED, on update and on append', async () => {
+    sheet.push(leadRow());
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-1' } }), T(0))));
+    expect(bookedAt()).toBe('2026-10-26 11:30:00');
+    sheet.length = 1;
+    await post(h, calRequest(event('BOOKING_CREATED', booking(), T(7))));
+    expect(bookedAt()).toBe('2026-10-26 11:37:00');
+  });
+
+  it('is never overwritten by a reschedule or a cancel', async () => {
+    sheet.push(leadRow());
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ uid: 'bk_A', metadata: { leadId: 'lead-1' } }), T(1))));
+    const first = bookedAt();
+    expect(first).toBe('2026-10-26 11:31:00');
+    await post(h, calRequest(event('BOOKING_RESCHEDULED', booking({ uid: 'bk_B', rescheduleUid: 'bk_A' }), T(2))));
+    expect(sheet[1]![COL['Status']!]).toBe('Rescheduled');
+    expect(bookedAt()).toBe(first);
+    expect(writtenRanges()).not.toContain(bookedAtCell());
+    await post(h, calRequest(event('BOOKING_CANCELLED', booking({ uid: 'bk_B' }), T(3))));
+    expect(sheet[1]![COL['Status']!]).toBe('Cancelled');
+    expect(bookedAt()).toBe(first);
+    expect(writtenRanges()).not.toContain(bookedAtCell());
+  });
+
+  it.each(['BOOKING_RESCHEDULED', 'BOOKING_CANCELLED'])('is left blank when a %s appends a new row', async (trigger) => {
+    const h = await loadHandler();
+    await post(h, calRequest(event(trigger, booking({ rescheduleUid: 'nope' }), T(1))));
+    expect(sheet).toHaveLength(2);
+    expect(bookedAt()).toBe('');
+  });
+
+  it('a stale CREATED writes nothing, Booked At included', async () => {
+    sheet.push(leadRow({ 'Last Event At': T(5), 'Booking UID': 'bk_1', 'Booked At (IST)': 'earlier' }));
+    const h = await loadHandler();
+    const out = await post(h, calRequest(event('BOOKING_CREATED', booking(), T(4))));
+    expect(out.body).toEqual({ ok: true, ignored: 'stale_event' });
+    expect(bookedAt()).toBe('earlier');
+    expect(calls.map((c) => c.method)).toEqual(['GET']);
+  });
+
+  it('a CREATED replay with no createdAt leaves a filled Booked At alone (first booking time never moves)', async () => {
+    sheet.push(leadRow({ 'Booking UID': 'bk_1', 'Booked At (IST)': '2026-10-20 10:00:00', Status: 'Booked' }));
+    const h = await loadHandler();
+    const out = await post(h, calRequest(event('BOOKING_CREATED', booking(), null)));
+    expect(out.body).toMatchObject({ ok: true, matchedBy: 'uid' });
+    expect(writtenRanges()).not.toContain(bookedAtCell());
+    expect(bookedAt()).toBe('2026-10-20 10:00:00');
+  });
+
+  it('a re-book after a cancel keeps the original first-booked time', async () => {
+    sheet.push(leadRow());
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ uid: 'bk_A', metadata: { leadId: 'lead-1' } }), T(1))));
+    await post(h, calRequest(event('BOOKING_CANCELLED', booking({ uid: 'bk_A' }), T(2))));
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ uid: 'bk_B', metadata: { leadId: 'lead-1' } }), T(3))));
+    expect(sheet[1]![COL['Booking UID']!]).toBe('bk_B');
+    expect(bookedAt()).toBe('2026-10-26 11:31:00');
+  });
+
+  it('a CREATED on a row whose Booked At is empty or blank writes it', async () => {
+    for (const existing of ['', '  ']) {
+      sheet = [[...HEADERS], leadRow({ 'Booked At (IST)': existing })];
+      const h = await loadHandler();
+      await post(h, calRequest(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-1' } }), T(1))));
+      expect(writtenRanges()).toContain(bookedAtCell());
+      expect(bookedAt()).toBe('2026-10-26 11:31:00');
+    }
+  });
+  describe('falls back to the server clock when the envelope time is unusable', () => {
+    const now = new Date('2026-10-28T10:00:00Z');
+    const parsed = () => {
+      const p = parseBooking(booking({ metadata: { leadId: 'lead-1' } }));
+      if (!p.ok) throw new Error('fixture');
+      return p.booking;
+    };
+
+    it.each([undefined, 'garbage', '2026-10-26', '2099-12-31T00:00:00Z'])('createdAt %j, on update', (createdAt) => {
+      const plan = planBooking([[...HEADERS], leadRow()], 'BOOKING_CREATED', parsed(), now, createdAt);
+      expect(plan.action).toBe('update');
+      if (plan.action === 'update') expect(plan.cells.bookedAt).toBe('2026-10-28 15:30:00');
+    });
+
+    it.each([undefined, 'garbage'])('createdAt %j, on append', (createdAt) => {
+      const plan = planBooking([[...HEADERS]], 'BOOKING_CREATED', parsed(), now, createdAt);
+      expect(plan.action).toBe('append');
+      if (plan.action === 'append') expect(plan.values[COL['Booked At (IST)']!]).toBe('2026-10-28 15:30:00');
+    });
+
+    it('is empty for a reschedule or a cancel even with a usable envelope time', () => {
+      for (const trigger of ['BOOKING_RESCHEDULED', 'BOOKING_CANCELLED'] as const) {
+        const plan = planBooking([[...HEADERS], leadRow()], trigger, parsed(), now, T(1));
+        expect(plan.action).toBe('update');
+        if (plan.action === 'update') expect(plan.cells.bookedAt).toBe('');
+      }
+    });
+  });
+});
+
+describe('hyphenated identifiers (Cal may turn _ into -)', () => {
+  const hyphenated = (id: string) => id.replaceAll('_', '-');
+
+  it.each(ANSWER_TABLE)('%s spelled with hyphens lands in the %s column on update and append', async (id, header, value, expected) => {
+    const responses = { [hyphenated(id)]: { label: id, value } };
+    sheet.push(leadRow());
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-1' }, responses }))));
+    expect(sheet[1]![COL[header]!]).toBe(expected);
+    expect(sheet[1]![COL['Booking Details']!]).toBe('');
+    expect(JSON.parse(logged(console.log as never, 'CAL_BOOKING_SYNCED')!)).not.toHaveProperty('unmapped');
+    sheet.length = 1;
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ uid: 'bk_2', responses }))));
+    expect(sheet[1]![COL[header]!]).toBe(expected);
+    expect(sheet[1]![COL['Booking Details']!]).toBe('');
+  });
+
+  it('the underscore spelling wins when both carry a value', async () => {
+    const h = await loadHandler();
+    const responses = { 'tech-team': { label: 'x', value: 'hyphen' }, tech_team: { label: 'y', value: 'underscore' } };
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ responses }))));
+    expect(sheet[1]![COL['Tech Team']!]).toBe('underscore');
+    expect(sheet[1]![COL['Booking Details']!]).toBe('');
+  });
+
+  it('the hyphen spelling is used when the underscore one is empty', async () => {
+    const h = await loadHandler();
+    const responses = { 'decision-maker': { label: 'x', value: 'No' }, decision_maker: { label: 'y', value: '' } };
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ responses }))));
+    expect(sheet[1]![COL['Decision Maker']!]).toBe('No');
+  });
+
+  it('a hyphenated typo is still reported as unmapped and kept in Booking Details', async () => {
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ responses: { 'tech-tema': { label: 'Tech', value: 'Yes' } } }))));
+    expect(sheet[1]![COL['Booking Details']!]).toBe('Tech: Yes');
+    expect(JSON.parse(logged(console.log as never, 'CAL_BOOKING_SYNCED')!).unmapped).toEqual(['tech-tema']);
+  });
+});
+
+describe('header guard', () => {
+  const OLD_HEADERS = [
+    'Submitted At (IST)', 'Full Name', 'Email', 'Phone', 'Status', 'UTM Source', 'UTM Medium', 'UTM Campaign', 'UTM Content',
+    'UTM Term', 'fbclid', 'gclid', 'li_fat_id', 'Referrer', 'Landing URL', 'User Agent', 'IP', 'Lead ID', 'Call Time (IST)',
+    'Booking Details', 'Booking UID', 'Last Event At',
+  ];
+
+  async function expectRefused(initial: string[][], opts: { trigger?: string } = {}) {
+    sheet = initial;
+    const h = await loadHandler();
+    const trigger = opts.trigger ?? 'BOOKING_CREATED';
+    const out = await post(h, calRequest(event(trigger, booking({ uid: 'bk_guard', metadata: { leadId: 'lead-1' }, responses: answerResponses() }))));
+    expect(out.status).toBe(500);
+    expect(out.body).toEqual({ ok: false, error: 'server_misconfigured' });
+    expect(calls.map((c) => c.method)).toEqual(['GET']);
+    expect(logged(console.log as never, 'CAL_BOOKING_SYNCED')).toBeUndefined();
+    expect(logged(console.error as never, 'CAL_WEBHOOK_WRITE_FAILED')).toBeUndefined();
+    const line = JSON.parse(logged(console.error as never, 'CAL_WEBHOOK_MISCONFIGURED')!);
+    expect(line.error).toMatch(/^sheet layout mismatch/);
+    expect(line.trigger).toBe(trigger);
+    expect(line.payload).toMatchObject({ uid: 'bk_guard' });
+    return line.error as string;
+  }
+
+  it.each(['BOOKING_CREATED', 'BOOKING_RESCHEDULED', 'BOOKING_CANCELLED'])('the old 22-column header: no write, 500, payload logged (%s)', async (trigger) => {
+    const error = await expectRefused([OLD_HEADERS, leadRow()], { trigger });
+    expect(error).toContain('column F (position 6): expected "Call Time (IST)", found "UTM Source"');
+    expect(sheet[1]).toEqual(leadRow());
+  });
+
+  it('an empty sheet: no write, 500, payload logged', async () => {
+    const error = await expectRefused([]);
+    expect(error).toContain('no header row');
+    expect(sheet).toEqual([]);
+  });
+
+  it('a header with one renamed column: no write, 500, names the column', async () => {
+    const renamed = [...HEADERS];
+    renamed[COL['Company']!] = 'Compnay';
+    const error = await expectRefused([renamed, leadRow()]);
+    expect(error).toContain('column I (position 9): expected "Company", found (other text, 7 characters)');
+  });
+
+  it('a header row cut short (trailing columns missing) is refused', async () => {
+    const error = await expectRefused([HEADERS.slice(0, 31), leadRow()]);
+    expect(error).toContain('column AF (position 32): expected "Last Event At", found (empty)');
+  });
+
+  it('a tab whose first row is a lead, not a header: refused, and the error never quotes row data', async () => {
+    const error = await expectRefused([leadRow()]);
+    for (const secret of ['Asha Rao', 'asha@example.com', '+919812345678', 'lead-1', 'UA']) expect(error).not.toContain(secret);
+    expect(error).toContain('(other text,');
+  });
+
+  it('the correct header, even with stray spaces in its cells, proceeds normally', async () => {
+    sheet = [HEADERS.map((x) => ` ${x} `), leadRow()];
+    const h = await loadHandler();
+    const out = await post(h, calRequest(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-1' }, responses: answerResponses('company') }))));
+    expect(out).toMatchObject({ status: 200, body: { ok: true, matchedBy: 'leadId' } });
+    expect(calls.map((c) => c.method)).toEqual(['GET', 'POST']);
+    expect(sheet[1]![COL['Company']!]).toBe('Rao & Co');
   });
 });

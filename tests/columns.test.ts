@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { BOTTLENECK_OPTIONS } from '../lib/schema.js';
 import { COLUMNS, HEADERS, LAST_COLUMN_LETTER, columnIndex, columnLetter, formatIST, toRow, type LeadRow } from '../lib/columns.js';
 
 const lead: LeadRow = {
@@ -41,6 +42,41 @@ describe('columns', () => {
     ]);
   });
 
+  it('places each qualification answer under its exact header, bottleneck joined in option order', () => {
+    const row = toRow({
+      ...lead,
+      designation: 'Founder',
+      company: 'Rao Textiles',
+      website: 'raotextiles.in',
+      revenue: '₹5 Crores – ₹20 Crores',
+      budget: '₹15 Lakhs – ₹50 Lakhs',
+      // ticked in reverse: the cell still follows BOTTLENECK_OPTIONS
+      bottleneck: [BOTTLENECK_OPTIONS[3], BOTTLENECK_OPTIONS[0]],
+      techTeam: 'Yes, but they lack AI expertise/are overwhelmed.',
+      timeline: 'Within the next 2-3 months',
+      decisionMaker: 'No',
+    });
+    const at = (h: string) => row[columnIndex(h)];
+    expect(at('Designation')).toBe('Founder');
+    expect(at('Company')).toBe('Rao Textiles');
+    expect(at('Website')).toBe('raotextiles.in');
+    expect(at('Annual Revenue')).toBe('₹5 Crores – ₹20 Crores');
+    expect(at('Budget (3-6 Months)')).toBe('₹15 Lakhs – ₹50 Lakhs');
+    expect(at('Bottleneck')).toBe(`${BOTTLENECK_OPTIONS[0]}; ${BOTTLENECK_OPTIONS[3]}`);
+    expect(at('Tech Team')).toBe('Yes, but they lack AI expertise/are overwhelmed.');
+    expect(at('Timeline')).toBe('Within the next 2-3 months');
+    expect(at('Decision Maker')).toBe('No');
+    // everything else is unchanged by the answers
+    expect(at('Status')).toBe('New');
+    expect(at('Booking Details')).toBe('');
+    expect(at('Lead ID')).toBe(lead.leadId);
+    expect(row).toHaveLength(32);
+  });
+
+  it('joins a single bottleneck without a separator', () => {
+    expect(toRow({ ...lead, bottleneck: [BOTTLENECK_OPTIONS[2]] })[columnIndex('Bottleneck')]).toBe(BOTTLENECK_OPTIONS[2]);
+  });
+
   it('formats IST across a day boundary and zero-pads', () => {
     expect(formatIST(new Date('2026-01-01T00:00:00Z'))).toBe('2026-01-01 05:30:00');
     expect(formatIST(new Date('2026-12-31T18:30:00Z'))).toBe('2027-01-01 00:00:00');
@@ -48,8 +84,14 @@ describe('columns', () => {
 
   it('leaves every booking column blank for a fresh lead', () => {
     const row = toRow(lead);
-    const booking = ['Call Time (IST)', 'Booked At (IST)', 'Designation', 'Company', 'Website', 'Annual Revenue', 'Budget (3-6 Months)', 'Bottleneck', 'Tech Team', 'Timeline', 'Decision Maker', 'Booking Details', 'Booking UID', 'Last Event At'];
+    const booking = ['Call Time (IST)', 'Booked At (IST)', 'Booking Details', 'Booking UID', 'Last Event At'];
     for (const h of booking) expect(row[columnIndex(h)]).toBe('');
+  });
+
+  it('leaves the answer columns blank for a lead without answers (a booking made without the site form)', () => {
+    const row = toRow(lead);
+    const answers = ['Designation', 'Company', 'Website', 'Annual Revenue', 'Budget (3-6 Months)', 'Bottleneck', 'Tech Team', 'Timeline', 'Decision Maker'];
+    for (const h of answers) expect(row[columnIndex(h)]).toBe('');
   });
 
   it('resolves column positions from the headers', () => {

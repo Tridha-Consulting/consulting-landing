@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { leadSchema, normalisePhone } from '../lib/schema.js';
+import {
+  BOTTLENECK_OPTIONS,
+  BUDGET_OPTIONS,
+  DECISION_MAKER_OPTIONS,
+  REVENUE_OPTIONS,
+  TECH_TEAM_OPTIONS,
+  TIMELINE_OPTIONS,
+  leadSchema,
+  normalisePhone,
+} from '../lib/schema.js';
 import { validBody } from './helpers.js';
 
 describe('leadSchema', () => {
@@ -36,6 +45,102 @@ describe('leadSchema', () => {
   it('rejects emails with non-ASCII local parts or underscores in the domain', () => {
     expect(leadSchema.safeParse({ ...validBody, email: 'josé@example.com' }).success).toBe(false);
     expect(leadSchema.safeParse({ ...validBody, email: 'a@exa_mple.com' }).success).toBe(false);
+  });
+});
+
+const CHOICES = {
+  revenue: REVENUE_OPTIONS,
+  budget: BUDGET_OPTIONS,
+  techTeam: TECH_TEAM_OPTIONS,
+  timeline: TIMELINE_OPTIONS,
+  decisionMaker: DECISION_MAKER_OPTIONS,
+} as const;
+
+const ANSWER_FIELDS = ['designation', 'company', 'website', 'revenue', 'budget', 'bottleneck', 'techTeam', 'timeline', 'decisionMaker'] as const;
+
+describe('leadSchema qualification answers', () => {
+  it('has the agreed option lists, in order', () => {
+    expect(REVENUE_OPTIONS).toEqual(['Upto ₹5 Crores', '₹5 Crores – ₹20 Crores', '₹20 Crores – ₹50 Crores', '₹50 Crores+']);
+    expect(BUDGET_OPTIONS).toEqual(['Less than ₹5 Lakhs', '₹5 Lakhs – ₹15 Lakhs', '₹15 Lakhs – ₹50 Lakhs', '₹50 Lakhs+']);
+    expect(DECISION_MAKER_OPTIONS).toEqual(['Yes, I sign off on budgets.', 'No']);
+    expect(BOTTLENECK_OPTIONS).toEqual([
+      'High manual labor/payroll costs in operations or customer support',
+      'Slow turnaround times (sales follow-ups, client deliverables, manual data entry)',
+      'Lack of a senior technical leader (CTO) to guide our tech roadmap',
+      "Inefficient internal systems that don't speak to each other",
+    ]);
+    expect(TECH_TEAM_OPTIONS).toEqual([
+      'Yes, we have a full dev team.',
+      'Yes, but they lack AI expertise/are overwhelmed.',
+      'No, we rely entirely on external vendors or manual processes.',
+    ]);
+    expect(TIMELINE_OPTIONS).toEqual([
+      'Immediately (Within the next 15-30 days)',
+      'Within the next 2-3 months',
+      'Just researching/No immediate timeline',
+    ]);
+  });
+
+  it.each(Object.entries(CHOICES))('%s accepts every option and rejects an unknown one', (field, options) => {
+    for (const o of options) expect(leadSchema.safeParse({ ...validBody, [field]: o }).success).toBe(true);
+    expect(leadSchema.safeParse({ ...validBody, [field]: 'Something else' }).success).toBe(false);
+    expect(leadSchema.safeParse({ ...validBody, [field]: options[0].toLowerCase() }).success).toBe(false);
+    expect(leadSchema.safeParse({ ...validBody, [field]: ` ${options[0]}` }).success).toBe(false);
+  });
+
+  it('accepts every single bottleneck option and one pair', () => {
+    for (const o of BOTTLENECK_OPTIONS) expect(leadSchema.safeParse({ ...validBody, bottleneck: [o] }).success).toBe(true);
+    expect(leadSchema.safeParse({ ...validBody, bottleneck: [BOTTLENECK_OPTIONS[3], BOTTLENECK_OPTIONS[1]] }).success).toBe(true);
+  });
+
+  it('rejects an unknown bottleneck option', () => {
+    expect(leadSchema.safeParse({ ...validBody, bottleneck: ['Something else'] }).success).toBe(false);
+    expect(leadSchema.safeParse({ ...validBody, bottleneck: [BOTTLENECK_OPTIONS[0], 'Something else'] }).success).toBe(false);
+  });
+
+  it.each(ANSWER_FIELDS)('rejects a missing %s', (field) => {
+    const r = leadSchema.safeParse({ ...validBody, [field]: undefined });
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.issues.map((i) => i.path[0])).toEqual([field]);
+  });
+
+  it('rejects zero, three or duplicate bottleneck selections with "Select one or two"', () => {
+    const three = [BOTTLENECK_OPTIONS[0], BOTTLENECK_OPTIONS[1], BOTTLENECK_OPTIONS[2]];
+    for (const bottleneck of [[], three, [BOTTLENECK_OPTIONS[0], BOTTLENECK_OPTIONS[0]], BOTTLENECK_OPTIONS[0], null]) {
+      const r = leadSchema.safeParse({ ...validBody, bottleneck });
+      expect(r.success).toBe(false);
+      if (!r.success) expect(r.error.issues.map((i) => i.message)).toContain('Select one or two');
+    }
+  });
+
+  it('trims text answers and enforces 1..max', () => {
+    expect(leadSchema.parse({ ...validBody, designation: '  CEO  ', company: ' Acme ', website: ' acme.com ' })).toMatchObject({
+      designation: 'CEO',
+      company: 'Acme',
+      website: 'acme.com',
+    });
+    const limits = { designation: 120, company: 120, website: 200 } as const;
+    for (const [field, max] of Object.entries(limits)) {
+      expect(leadSchema.safeParse({ ...validBody, [field]: 'a'.repeat(max) }).success).toBe(true);
+      expect(leadSchema.safeParse({ ...validBody, [field]: 'a'.repeat(max + 1) }).success).toBe(false);
+      expect(leadSchema.safeParse({ ...validBody, [field]: '   ' }).success).toBe(false);
+      expect(leadSchema.safeParse({ ...validBody, [field]: '' }).success).toBe(false);
+    }
+  });
+
+  it('does not format-check the website', () => {
+    expect(leadSchema.safeParse({ ...validBody, website: 'not a url at all' }).success).toBe(true);
+  });
+
+  it('gives a readable message per missing answer', () => {
+    const r = leadSchema.safeParse({});
+    expect(r.success).toBe(false);
+    if (r.success) return;
+    const byField = new Map(r.error.issues.map((i) => [String(i.path[0]), i.message]));
+    for (const f of ANSWER_FIELDS) {
+      expect(byField.get(f), f).toBeDefined();
+      expect(byField.get(f), f).not.toMatch(/invalid input|expected/i);
+    }
   });
 });
 

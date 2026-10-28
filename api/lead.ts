@@ -6,7 +6,10 @@ import type { LeadSink } from '../lib/sinks/index.js';
 // Web-standard handlers (named method exports). Vercel's Node helper layer, which pre-drains
 // the request stream into req.body, is not in the path, so the body is read here exactly once.
 
-const MAX_BODY_BYTES = 10 * 1024;
+// Largest valid body: 12 answers (~1 KB), ten attribution fields of 500 characters, a Turnstile token
+// (up to 2 KB), and up to 3 bytes per UTF-16 unit for non-Latin text. That worst case is about 19.6 KB
+// (about 8.5 KB when ASCII), so a body past 24 KiB is not a real lead.
+const MAX_BODY_BYTES = 24 * 1024;
 const TURNSTILE_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 
 class BodyError extends Error {

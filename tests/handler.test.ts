@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as lead from '../api/lead.js';
+import { toRow } from '../lib/columns.js';
+import { BOTTLENECK_OPTIONS } from '../lib/schema.js';
 import { makeRequest, readJsonResponse, validBody } from './helpers.js';
 
 const write = vi.fn();
@@ -47,6 +49,59 @@ describe('POST /api/lead', () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  it('a full valid body appends a row with every answer under its header', async () => {
+    const out = await call('POST', validBody);
+    expect(out.statusCode).toBe(200);
+    expect(write).toHaveBeenCalledTimes(1);
+    const row = toRow(write.mock.calls[0]![0] as Parameters<typeof toRow>[0]);
+    expect(row).toContain('Founder');
+    expect(row).toContain('Rao Textiles');
+    expect(row).toContain('raotextiles.in');
+    expect(row).toContain('₹5 Crores – ₹20 Crores');
+    expect(row).toContain('₹15 Lakhs – ₹50 Lakhs');
+    expect(row).toContain(`${BOTTLENECK_OPTIONS[0]}; ${BOTTLENECK_OPTIONS[3]}`);
+    expect(row).toContain('Yes, but they lack AI expertise/are overwhelmed.');
+    expect(row).toContain('Immediately (Within the next 15-30 days)');
+    expect(row).toContain('Yes, I sign off on budgets.');
+  });
+
+  it('a missing or unknown answer -> 400 naming the field, no write', async () => {
+    const missing = await call('POST', { ...validBody, budget: undefined });
+    expect(missing.statusCode).toBe(400);
+    expect(Object.keys((missing.body as { fields: Record<string, string[]> }).fields)).toEqual(['budget']);
+    const unknown = await call('POST', { ...validBody, bottleneck: ['nope'] });
+    expect(unknown.statusCode).toBe(400);
+    expect(Object.keys((unknown.body as { fields: Record<string, string[]> }).fields)).toEqual(['bottleneck']);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('accepts the largest valid body, for ASCII and for multi-byte text', async () => {
+    const attributionKeys = ['utmSource', 'utmMedium', 'utmCampaign', 'utmContent', 'utmTerm', 'fbclid', 'gclid', 'liFatId', 'referrer', 'landingUrl'];
+    const [b1, b2] = [...BOTTLENECK_OPTIONS].sort((a, b) => b.length - a.length);
+    for (const ch of ['a', 'ह']) {
+      const body = {
+        ...validBody,
+        ...Object.fromEntries(attributionKeys.map((k) => [k, ch.repeat(500)])),
+        fullName: ch.repeat(120),
+        designation: ch.repeat(120),
+        company: ch.repeat(120),
+        website: ch.repeat(200),
+        email: `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.example.com`,
+        bottleneck: [b1, b2],
+        company_website: '',
+        turnstileToken: 't'.repeat(2048),
+      };
+      const raw = JSON.stringify(body);
+      // MAX_BODY_BYTES is 24 KiB; the multi-byte body is well past the 10 KiB the endpoint started with.
+      expect(Buffer.byteLength(raw), ch).toBeLessThanOrEqual(24 * 1024);
+      if (ch !== 'a') expect(Buffer.byteLength(raw)).toBeGreaterThan(10 * 1024);
+      write.mockClear();
+      const out = await call('POST', raw);
+      expect(out.statusCode, ch).toBe(200);
+      expect(write, ch).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it('invalid -> 400 with field errors', async () => {
     const out = await call('POST', { ...validBody, email: 'nope', phone: '1' });
     expect(out.statusCode).toBe(400);
@@ -65,12 +120,12 @@ describe('POST /api/lead', () => {
 
   it('rejects malformed JSON with 400 and an oversize body with 413', async () => {
     expect((await call('POST', '{not json')).statusCode).toBe(400);
-    expect((await call('POST', { ...validBody, referrer: 'x'.repeat(11 * 1024) })).statusCode).toBe(413);
+    expect((await call('POST', { ...validBody, referrer: 'x'.repeat(25 * 1024) })).statusCode).toBe(413);
     expect(write).not.toHaveBeenCalled();
   });
 
   it('413 up front from Content-Length, without reading the body', async () => {
-    const req = makeRequest('POST', validBody, { 'content-length': String(11 * 1024) });
+    const req = makeRequest('POST', validBody, { 'content-length': String(25 * 1024) });
     const textSpy = vi.spyOn(req, 'text');
     const res = await handlers.POST!(req);
     expect(res.status).toBe(413);

@@ -1,7 +1,18 @@
+import { BOTTLENECK_OPTIONS, BUDGET_OPTIONS, DECISION_MAKER_OPTIONS, REVENUE_OPTIONS, TECH_TEAM_OPTIONS, TIMELINE_OPTIONS } from '../lib/schema.js';
+
 export const validBody = {
   fullName: 'Asha Rao',
-  email: 'asha@example.com',
+  designation: 'Founder',
   phone: '+919812345678',
+  email: 'asha@example.com',
+  company: 'Rao Textiles',
+  website: 'raotextiles.in',
+  revenue: REVENUE_OPTIONS[1],
+  budget: BUDGET_OPTIONS[2],
+  bottleneck: [BOTTLENECK_OPTIONS[0], BOTTLENECK_OPTIONS[3]],
+  techTeam: TECH_TEAM_OPTIONS[1],
+  timeline: TIMELINE_OPTIONS[0],
+  decisionMaker: DECISION_MAKER_OPTIONS[0],
   utmSource: 'meta',
   landingUrl: 'https://consulting.tridha.net/?utm_source=meta',
 };

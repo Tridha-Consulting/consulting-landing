@@ -28,6 +28,60 @@ export function normalisePhone(raw: string): string {
 }
 
 /**
+ * Option lists of the qualification questions, in display order. The server is the contract:
+ * js/form.js mirrors these strings by copy and tests/client-parity.test.ts pins the copies.
+ * The cell written to the sheet is the option text itself.
+ */
+export const REVENUE_OPTIONS = [
+  'Upto ₹5 Crores',
+  '₹5 Crores – ₹20 Crores',
+  '₹20 Crores – ₹50 Crores',
+  '₹50 Crores+',
+] as const;
+
+export const BUDGET_OPTIONS = [
+  'Less than ₹5 Lakhs',
+  '₹5 Lakhs – ₹15 Lakhs',
+  '₹15 Lakhs – ₹50 Lakhs',
+  '₹50 Lakhs+',
+] as const;
+
+export const BOTTLENECK_OPTIONS = [
+  'High manual labor/payroll costs in operations or customer support',
+  'Slow turnaround times (sales follow-ups, client deliverables, manual data entry)',
+  'Lack of a senior technical leader (CTO) to guide our tech roadmap',
+  "Inefficient internal systems that don't speak to each other",
+] as const;
+
+export const TECH_TEAM_OPTIONS = [
+  'Yes, we have a full dev team.',
+  'Yes, but they lack AI expertise/are overwhelmed.',
+  'No, we rely entirely on external vendors or manual processes.',
+] as const;
+
+export const TIMELINE_OPTIONS = [
+  'Immediately (Within the next 15-30 days)',
+  'Within the next 2-3 months',
+  'Just researching/No immediate timeline',
+] as const;
+
+export const DECISION_MAKER_OPTIONS = ['Yes, I sign off on budgets.', 'No'] as const;
+
+/** A required free-text answer, trimmed, 1..max characters. */
+function answerText(label: string, max: number) {
+  return z
+    .string({ error: `${label} is required` })
+    .trim()
+    .min(1, `${label} is required`)
+    .max(max, `${label} is too long`);
+}
+
+/** A required single choice from a fixed list. */
+function choice<const T extends readonly [string, ...string[]]>(options: T, label: string) {
+  return z.enum(options, { error: `Choose ${label}` });
+}
+
+/**
  * Single source of truth for an inbound lead. js/form.js mirrors these rules by name; its email
  * pattern is a copy of zod's (z.regexes.email), pinned by tests/client-parity.test.ts.
  */
@@ -38,6 +92,19 @@ export const leadSchema = z.object({
     .string()
     .transform(normalisePhone)
     .refine((v) => /^\+\d{6,15}$/.test(v), 'Enter a phone number with country code (6-15 digits)'),
+  designation: answerText('Designation', 120),
+  company: answerText('Company name', 120),
+  website: answerText('Company website', 200),
+  revenue: choice(REVENUE_OPTIONS, 'your annual revenue'),
+  budget: choice(BUDGET_OPTIONS, 'your budget'),
+  bottleneck: z
+    .array(z.enum(BOTTLENECK_OPTIONS, { error: 'Select one or two' }), { error: 'Select one or two' })
+    .min(1, 'Select one or two')
+    .max(2, 'Select one or two')
+    .refine((v) => new Set(v).size === v.length, 'Select one or two'),
+  techTeam: choice(TECH_TEAM_OPTIONS, 'an option'),
+  timeline: choice(TIMELINE_OPTIONS, 'an option'),
+  decisionMaker: choice(DECISION_MAKER_OPTIONS, 'an option'),
   utmSource: attr,
   utmMedium: attr,
   utmCampaign: attr,

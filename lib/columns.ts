@@ -1,7 +1,10 @@
-import type { LeadInput } from './schema.js';
+import { BOTTLENECK_OPTIONS, type LeadInput } from './schema.js';
+
+/** Qualification answers. A lead from the site form always has them; a row built from a Cal booking alone may not. */
+type AnswerKey = 'designation' | 'company' | 'website' | 'revenue' | 'budget' | 'bottleneck' | 'techTeam' | 'timeline' | 'decisionMaker';
 
 /** A validated lead plus server-side fields. */
-export interface LeadRow extends LeadInput {
+export interface LeadRow extends Omit<LeadInput, AnswerKey>, Partial<Pick<LeadInput, AnswerKey>> {
   leadId: string;
   submittedAt: Date;
   userAgent: string;
@@ -32,7 +35,7 @@ export const STATUS = {
  * The one definition of the sheet layout: header text and where each value comes from.
  * While the sheet holds no data rows the layout may be reordered freely. Once it does, columns are
  * only ever appended: reordering would misalign every existing row against the new headers.
- * Booking columns are filled by /api/cal-webhook; a fresh lead from /api/lead leaves them blank.
+ * Call, booking and event columns are filled by /api/cal-webhook; a fresh lead from /api/lead leaves them blank.
  */
 export const COLUMNS: readonly Column[] = [
   { header: 'Submitted At (IST)', value: (l) => formatIST(l.submittedAt) },
@@ -43,16 +46,19 @@ export const COLUMNS: readonly Column[] = [
   { header: 'Call Time (IST)', value: () => '' },
   // When the booking was made (its BOOKING_CREATED event), as opposed to when the call is.
   { header: 'Booked At (IST)', value: () => '' },
-  // One column per booking-form answer; lib/cal-booking.ts maps Cal field identifiers to these.
-  { header: 'Designation', value: () => '' },
-  { header: 'Company', value: () => '' },
-  { header: 'Website', value: () => '' },
-  { header: 'Annual Revenue', value: () => '' },
-  { header: 'Budget (3-6 Months)', value: () => '' },
-  { header: 'Bottleneck', value: () => '' },
-  { header: 'Tech Team', value: () => '' },
-  { header: 'Timeline', value: () => '' },
-  { header: 'Decision Maker', value: () => '' },
+  // One column per qualification answer. /api/lead fills them from the site form. A booking updating
+  // that row only writes a column when Cal sent a non-empty answer for it, and a lead created from a
+  // booking alone gets them from lib/cal-booking.ts (ANSWER_COLUMNS) if the event type asks such questions.
+  { header: 'Designation', value: (l) => l.designation ?? '' },
+  { header: 'Company', value: (l) => l.company ?? '' },
+  { header: 'Website', value: (l) => l.website ?? '' },
+  { header: 'Annual Revenue', value: (l) => l.revenue ?? '' },
+  { header: 'Budget (3-6 Months)', value: (l) => l.budget ?? '' },
+  // Selections joined in the order of BOTTLENECK_OPTIONS, not the order they were ticked.
+  { header: 'Bottleneck', value: (l) => BOTTLENECK_OPTIONS.filter((o) => l.bottleneck?.includes(o)).join('; ') },
+  { header: 'Tech Team', value: (l) => l.techTeam ?? '' },
+  { header: 'Timeline', value: (l) => l.timeline ?? '' },
+  { header: 'Decision Maker', value: (l) => l.decisionMaker ?? '' },
   // Booking answers that have no column of their own, plus the cancellation reason.
   { header: 'Booking Details', value: () => '' },
   { header: 'UTM Source', value: (l) => l.utmSource ?? '' },

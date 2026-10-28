@@ -1,4 +1,4 @@
-/* Pure "did you mean" helper for the lead form's email step. Advice only: the server never rejects on it. */
+/* Pure "did you mean" helper: suggests a corrected address for a likely typo in the email domain. Advice only: the server never rejects on it. */
 (function () {
   'use strict';
 

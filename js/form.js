@@ -1,4 +1,4 @@
-/* Lead form: modal, 3 client-side steps, one POST to /api/lead. Never navigates. */
+/* Lead form: modal with every question on one scrolling page, one POST to /api/lead. Never navigates. */
 (function () {
   'use strict';
 
@@ -7,14 +7,65 @@
   var ATTR_KEY = 'tridha_attribution';
   var ATTR_PARAMS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid', 'gclid', 'li_fat_id'];
 
-  /* Same rule names as lib/schema.ts (fullName, email, phone, attribution).
+  /* Same rule names as lib/schema.ts (fullName, email, phone, designation, company, website, attribution).
      email.pattern is a copy of zod's email regex used by lib/schema.ts (z.regexes.email); the server
      is the contract, so any change must be made there first. tests/client-parity.test.ts enforces it. */
   var RULES = {
     fullName: { min: 1, max: 120 },
+    designation: { min: 1, max: 120 },
+    company: { min: 1, max: 120 },
+    website: { min: 1, max: 200 },
     email: { max: 254, pattern: /^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/ },
     phone: { minDigits: 6, maxDigits: 15 },
     attribution: { max: 500 }
+  };
+
+  /* Answer options in display order. Copies of the lists exported by lib/schema.ts, which is the
+     contract; tests/client-parity.test.ts compares them string for string. */
+  var OPTIONS = {
+    revenue: [
+      'Upto ₹5 Crores',
+      '₹5 Crores – ₹20 Crores',
+      '₹20 Crores – ₹50 Crores',
+      '₹50 Crores+'
+    ],
+    budget: [
+      'Less than ₹5 Lakhs',
+      '₹5 Lakhs – ₹15 Lakhs',
+      '₹15 Lakhs – ₹50 Lakhs',
+      '₹50 Lakhs+'
+    ],
+    bottleneck: [
+      'High manual labor/payroll costs in operations or customer support',
+      'Slow turnaround times (sales follow-ups, client deliverables, manual data entry)',
+      'Lack of a senior technical leader (CTO) to guide our tech roadmap',
+      "Inefficient internal systems that don't speak to each other"
+    ],
+    techTeam: [
+      'Yes, we have a full dev team.',
+      'Yes, but they lack AI expertise/are overwhelmed.',
+      'No, we rely entirely on external vendors or manual processes.'
+    ],
+    timeline: [
+      'Immediately (Within the next 15-30 days)',
+      'Within the next 2-3 months',
+      'Just researching/No immediate timeline'
+    ],
+    decisionMaker: [
+      'Yes, I sign off on budgets.',
+      'No'
+    ]
+  };
+  var MAX_BOTTLENECKS = 2;
+
+  /* Question text of each choice group. A group is a fieldset of radios, or of checkboxes for bottleneck. */
+  var QUESTIONS = {
+    revenue: "What is your company's current annual revenue?",
+    budget: 'To implement custom AI or scale your tech infrastructure, what is your approved investment budget for the next 3-6 months?',
+    bottleneck: "What is the biggest operational bottleneck currently slowing down your company's growth? (Select up to two)",
+    techTeam: 'Do you have an in-house development/tech team?',
+    timeline: 'If we identify a clear ROI path to automate your bottlenecks, how soon are you looking to initiate the project?',
+    decisionMaker: 'Are you the primary decision-maker for financial investments in your company?'
   };
 
   var COUNTRIES = [
@@ -36,7 +87,9 @@
     try { window.sessionStorage.setItem(ATTR_KEY, v); } catch (e) { /* ignore */ }
   }
 
-  function clip(v) { return String(v == null ? '' : v).slice(0, RULES.attribution.max); }
+  /* Control characters are dropped: each JSON-escapes to six bytes, so a crafted link could push the
+  request body past the server's size cap, and the stored attribution would repeat that on every retry. */
+  function clip(v) { return String(v == null ? '' : v).replace(/[\u0000-\u001F\u007F]/g, '').slice(0, RULES.attribution.max); }
 
   /* A URL carrying any campaign/click id replaces what is stored (an ad click after an organic
      visit in the same tab must win). Otherwise the stored record is kept; capture fresh if none. */
@@ -82,6 +135,15 @@
     if (field === 'fullName') {
       if (v.length < RULES.fullName.min) return 'Please enter your full name.';
       if (v.length > RULES.fullName.max) return 'Name is too long.';
+    } else if (field === 'designation') {
+      if (v.length < RULES.designation.min) return 'Please enter your designation.';
+      if (v.length > RULES.designation.max) return 'Designation is too long.';
+    } else if (field === 'company') {
+      if (v.length < RULES.company.min) return 'Please enter your company name.';
+      if (v.length > RULES.company.max) return 'Company name is too long.';
+    } else if (field === 'website') {
+      if (v.length < RULES.website.min) return 'Please enter your company website.';
+      if (v.length > RULES.website.max) return 'Website is too long.';
     } else if (field === 'email') {
       if (!v) return 'Please enter your email address.';
       if (v.length > RULES.email.max || !RULES.email.pattern.test(v)) return 'Please enter a valid email address.';
@@ -111,49 +173,97 @@
   }
 
   /* ---------- modal state ---------- */
-  var overlay, card, form, closeBtn, nextBtn, backBtn, submitErr, lastTrigger, root;
-  var inputs = {}, errs = {}, steps = [], stepIndex = 0, busy = false, sent = false, doneEl = null;
+  var overlay, card, form, closeBtn, submitBtn, submitErr, lastTrigger, root;
+  /* inputs[k] is the control that carries aria-invalid (the input, or the fieldset of a choice group);
+     choices[k] lists the radios/checkboxes of a group; wraps[k] is the element scrolled into view. */
+  var inputs = {}, errs = {}, choices = {}, wraps = {}, busy = false, sent = false, doneEl = null;
   var tsToken = '', tsLoaded = false, tsWidgetId = null;
-  var FIELD_ORDER = ['fullName', 'email', 'phone'];
+  var FIELD_ORDER = ['fullName', 'designation', 'phone', 'email', 'company', 'website',
+    'revenue', 'budget', 'bottleneck', 'techTeam', 'timeline', 'decisionMaker'];
 
   function build() {
     var uid = 'trd-' + Math.random().toString(36).slice(2, 7);
 
-    function field(name, label, input, control) {
+    function errorEl(name) {
       var err = el('div', { class: 'trd-error', id: uid + '-' + name + '-err', 'aria-live': 'polite' });
       errs[name] = err;
-      inputs[name] = input;
-      input.setAttribute('aria-describedby', err.id);
-      return el('div', { class: 'trd-step' }, [
-        el('label', { class: 'trd-label', for: input.id, text: label }), control || input, err
-      ]);
+      return err;
     }
 
-    var name = el('input', { class: 'trd-input', id: uid + '-name', type: 'text', name: 'fullName', autocomplete: 'name', placeholder: 'Enter your full name', required: '', maxlength: String(RULES.fullName.max) });
-    var email = el('input', { class: 'trd-input', id: uid + '-email', type: 'email', name: 'email', autocomplete: 'email', inputmode: 'email', placeholder: 'your@email.com', required: '' });
+    function field(name, label, input, control) {
+      var err = errorEl(name);
+      inputs[name] = input;
+      input.setAttribute('aria-describedby', err.id);
+      wraps[name] = el('div', { class: 'trd-field' }, [
+        el('label', { class: 'trd-label', for: input.id, text: label + ' *' }), control || input, err
+      ]);
+      return wraps[name];
+    }
+
+    function textField(name, id, label, attrs) {
+      var base = { class: 'trd-input', id: uid + '-' + id, type: 'text', name: name, required: '' };
+      Object.keys(attrs).forEach(function (k) { base[k] = attrs[k]; });
+      return field(name, label, el('input', base));
+    }
+
+    /* One question: a fieldset whose legend is the question and whose options are radios (one answer)
+       or checkboxes (bottleneck: one or two). */
+    function group(name) {
+      var multi = name === 'bottleneck';
+      var err = errorEl(name);
+      var boxes = [];
+      var list = el('div', { class: 'trd-options' });
+      OPTIONS[name].forEach(function (text, i) {
+        var box = el('input', { class: 'trd-choice', id: uid + '-' + name + '-' + i, type: multi ? 'checkbox' : 'radio', name: name, value: text });
+        boxes.push(box);
+        list.appendChild(el('label', { class: 'trd-option', for: box.id }, [box, el('span', { class: 'trd-option-text', text: text })]));
+      });
+      var fs = el('fieldset', { class: 'trd-field trd-group', 'aria-describedby': err.id }, [
+        el('legend', { class: 'trd-label', text: QUESTIONS[name] + ' *' }), list, err
+      ]);
+      if (!multi) { fs.setAttribute('role', 'radiogroup'); fs.setAttribute('aria-required', 'true'); }
+      choices[name] = boxes;
+      inputs[name] = fs;
+      wraps[name] = fs;
+      fs.addEventListener('change', function () {
+        if (multi) limitBottlenecks();
+        setError(name, '');
+        submitErr.textContent = '';
+      });
+      return fs;
+    }
+
+    var fullName = textField('fullName', 'name', 'Full Name', { autocomplete: 'name', placeholder: 'Enter your full name', maxlength: String(RULES.fullName.max) });
+    var designation = textField('designation', 'designation', 'Designation', { autocomplete: 'organization-title', placeholder: 'Your role, e.g. Founder', maxlength: String(RULES.designation.max) });
+
     var sel = el('select', { class: 'trd-select', id: uid + '-dial', 'aria-label': 'Country code' });
     COUNTRIES.forEach(function (c) { sel.appendChild(el('option', { value: c[1], text: c[0] + ' (+' + c[1] + ')' })); });
     sel.value = '91';
     var tel = el('input', { class: 'trd-input', id: uid + '-phone', type: 'tel', name: 'phone', autocomplete: 'tel-national', inputmode: 'tel', placeholder: 'Phone number', required: '' });
     inputs.dial = sel;
+    var phone = field('phone', 'Phone', tel, el('div', { class: 'trd-phone' }, [sel, tel]));
 
-    var s1 = field('fullName', 'Full Name *', name);
-    var s2 = field('email', 'Email *', email);
-    var s3 = field('phone', 'Phone *', tel, el('div', { class: 'trd-phone' }, [sel, tel]));
-    s3.appendChild(el('div', { class: 'trd-ts' }));
-    steps = [s1, s2, s3];
+    var email = field('email', 'Email', el('input', { class: 'trd-input', id: uid + '-email', type: 'email', name: 'email', autocomplete: 'email', inputmode: 'email', placeholder: 'your@email.com', required: '' }));
+    var company = textField('company', 'company', 'Company Name', { autocomplete: 'organization', placeholder: 'Your company name', maxlength: String(RULES.company.max) });
+    var website = textField('website', 'website', 'Company Website', { autocomplete: 'url', inputmode: 'url', autocapitalize: 'none', spellcheck: 'false', placeholder: 'yourcompany.com', maxlength: String(RULES.website.max) });
 
+    /* Honeypot. Its DOM name is deliberately not "company_website": browser autofill would fill a
+       field of that name from the visible Company Website and the lead would be dropped as spam.
+       The request key is still company_website (see send). */
     var hp = el('div', { class: 'trd-hp', 'aria-hidden': 'true' }, [
-      el('input', { type: 'text', name: 'company_website', tabindex: '-1', autocomplete: 'off' })
+      el('input', { type: 'text', name: 'trd_extra', tabindex: '-1', autocomplete: 'off' })
     ]);
     inputs.hp = hp.firstChild;
 
     submitErr = el('div', { class: 'trd-submit-error', role: 'alert' });
-    backBtn = el('button', { type: 'button', class: 'trd-btn trd-btn-back', text: '← Back' });
-    nextBtn = el('button', { type: 'submit', class: 'trd-btn', text: 'Next →' });
-    var actions = el('div', { class: 'trd-actions' }, [backBtn, el('span', { class: 'trd-spacer' }), nextBtn]);
+    submitBtn = el('button', { type: 'submit', class: 'trd-btn', text: 'Submit' });
+    var actions = el('div', { class: 'trd-actions' }, [el('span', { class: 'trd-spacer' }), submitBtn]);
 
-    form = el('form', { novalidate: '', autocomplete: 'on' }, [s1, s2, s3, hp, submitErr, actions]);
+    form = el('form', { novalidate: '', autocomplete: 'on' }, [
+      fullName, designation, phone, email, company, website,
+      group('revenue'), group('budget'), group('bottleneck'), group('techTeam'), group('timeline'), group('decisionMaker'),
+      el('div', { class: 'trd-ts' }), hp, submitErr, actions
+    ]);
     closeBtn = el('button', { type: 'button', class: 'trd-close', 'aria-label': 'Close', text: '×' });
     var title = el('h2', { id: uid + '-title', class: 'trd-hp', text: 'Book a free call' });
     card = el('div', { class: 'trd-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': title.id }, [title, closeBtn, form]);
@@ -162,47 +272,72 @@
 
     closeBtn.addEventListener('click', close);
     overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) close(); });
-    backBtn.addEventListener('click', function () { if (!busy && stepIndex > 0) showStep(stepIndex - 1); });
     form.addEventListener('submit', onSubmit);
     FIELD_ORDER.forEach(function (k) {
+      if (choices[k]) return;
       inputs[k].addEventListener('input', function () { setError(k, ''); submitErr.textContent = ''; if (k === 'email') keptEmail = null; });
     });
+    inputs.dial.addEventListener('change', function () { setError('phone', ''); });
     overlay.addEventListener('keydown', trapTab);
-    showStep(0, true);
+  }
+
+  /* "Select up to two": with two ticked, the rest are disabled until one is unticked. */
+  function limitBottlenecks() {
+    var boxes = choices.bottleneck;
+    var full = boxes.filter(function (b) { return b.checked; }).length >= MAX_BOTTLENECKS;
+    boxes.forEach(function (b) { b.disabled = full && !b.checked; });
   }
 
   function setError(k, msg) {
     errs[k].textContent = msg;
     errs[k].classList.remove('is-hint');
+    inputs[k].classList.toggle('is-invalid', !!msg);
     if (msg) inputs[k].setAttribute('aria-invalid', 'true'); else inputs[k].removeAttribute('aria-invalid');
   }
 
-  function showStep(i, noFocus) {
-    stepIndex = i;
-    steps.forEach(function (s, n) { s.classList.toggle('is-active', n === i); });
-    backBtn.style.visibility = i === 0 ? 'hidden' : 'visible';
-    var last = i === steps.length - 1;
-    nextBtn.textContent = last ? 'Submit' : 'Next →';
-    submitErr.textContent = '';
-    if (last) ensureTurnstile();
-    if (!noFocus) focusStep();
+  /* Current answer of a field: the trimmed text, the chosen option, or for bottleneck the ticked
+     options (in option order). */
+  function answer(k) {
+    if (!choices[k]) return inputs[k].value.trim();
+    var picked = choices[k].filter(function (b) { return b.checked; }).map(function (b) { return b.value; });
+    return k === 'bottleneck' ? picked : (picked[0] || '');
   }
 
-  function focusStep() {
-    var f = inputs[FIELD_ORDER[stepIndex]];
-    if (f) f.focus();
+  function fieldMessage(k) {
+    if (k === 'bottleneck') {
+      var n = answer(k).length;
+      return n < 1 || n > MAX_BOTTLENECKS ? 'Select one or two.' : '';
+    }
+    if (choices[k]) return answer(k) ? '' : 'Please choose an option.';
+    return validate(k, inputs[k].value, inputs.dial.value);
   }
 
-  function stepValid(i) {
-    var k = FIELD_ORDER[i];
-    var msg = validate(k, inputs[k].value, inputs.dial.value);
-    setError(k, msg);
-    if (msg) inputs[k].focus();
-    return !msg;
+  /* Validates every field, shows every error, and returns the first invalid field (or ''). */
+  function validateAll() {
+    var first = '';
+    FIELD_ORDER.forEach(function (k) {
+      var msg = fieldMessage(k);
+      setError(k, msg);
+      if (msg && !first) first = k;
+    });
+    return first;
   }
 
-  /* Typo advice for the email step. Returns true when a suggestion was shown (caller must not advance).
-     The address the user has already been asked about is remembered so pressing Next again keeps it. */
+  /* Focuses a field's first control; with scroll, first brings the field to the middle of the view
+     (the card scrolls inside the overlay). */
+  function focusField(k, scroll) {
+    var target = choices[k] ? (choices[k].filter(function (b) { return b.checked; })[0] || choices[k][0]) : inputs[k];
+    if (!target) return;
+    if (scroll) {
+      try { wraps[k].scrollIntoView({ block: 'center' }); } catch (e) { /* ignore */ }
+      try { target.focus({ preventScroll: true }); } catch (e) { target.focus(); }
+    } else {
+      target.focus();
+    }
+  }
+
+  /* Typo advice for the email field. Returns true when a suggestion was shown (caller must not send).
+     The address the user has already been asked about is remembered so submitting again keeps it. */
   var keptEmail = null;
   function emailHintShown() {
     var v = inputs.email.value.trim();
@@ -215,26 +350,26 @@
     btn.addEventListener('click', function () {
       inputs.email.value = s;
       setError('email', '');
-      if (!busy && !sent) showStep(stepIndex + 1);
+      inputs.email.focus();
     });
     errs.email.textContent = '';
     errs.email.classList.add('is-hint');
     errs.email.appendChild(document.createTextNode('Did you mean '));
     errs.email.appendChild(btn);
     errs.email.appendChild(document.createTextNode('?'));
-    inputs.email.focus();
+    focusField('email', true);
     return true;
   }
 
+  /* Every error is shown at once and the first invalid field gets focus. The typo hint is checked
+     only once the rest is valid, so it never competes with an error for the focus. */
   function onSubmit(e) {
     e.preventDefault();
     if (busy || sent) return;
-    if (!stepValid(stepIndex)) return;
-    if (FIELD_ORDER[stepIndex] === 'email' && emailHintShown()) return;
-    if (stepIndex < steps.length - 1) { showStep(stepIndex + 1); return; }
-    for (var i = 0; i < steps.length - 1; i++) {
-      if (!stepValid(i)) { showStep(i); return; }
-    }
+    submitErr.textContent = '';
+    var first = validateAll();
+    if (first) { focusField(first, true); return; }
+    if (emailHintShown()) return;
     send();
   }
 
@@ -271,10 +406,14 @@
   }
 
   /* ---------- submit ---------- */
-  function fail() {
+  function resetSubmit() {
     busy = false;
-    nextBtn.disabled = false;
-    nextBtn.textContent = 'Submit';
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Submit';
+  }
+
+  function fail() {
+    resetSubmit();
     submitErr.textContent = '';
     submitErr.appendChild(document.createTextNode('Sorry, something went wrong and your details were not sent. Please try again, or contact us at '));
     var c = CFG.FALLBACK_CONTACT || '';
@@ -288,18 +427,18 @@
 
   function send() {
     busy = true;
-    nextBtn.disabled = true;
-    nextBtn.textContent = '';
-    nextBtn.appendChild(el('span', { class: 'trd-spinner', 'aria-hidden': 'true' }));
-    nextBtn.appendChild(document.createTextNode('Submitting'));
+    submitBtn.disabled = true;
+    submitBtn.textContent = '';
+    submitBtn.appendChild(el('span', { class: 'trd-spinner', 'aria-hidden': 'true' }));
+    submitBtn.appendChild(document.createTextNode('Submitting'));
     submitErr.textContent = '';
 
     var pre = CFG.TURNSTILE_SITE_KEY ? waitForToken(8000) : Promise.resolve('');
     pre.then(function (token) {
       var body = attributionPayload();
-      body.fullName = inputs.fullName.value.trim();
-      body.email = inputs.email.value.trim();
-      body.phone = normalisePhone(inputs.dial.value, inputs.phone.value);
+      FIELD_ORDER.forEach(function (k) {
+        body[k] = k === 'phone' ? normalisePhone(inputs.dial.value, inputs.phone.value) : answer(k);
+      });
       body.company_website = inputs.hp.value;
       if (token) body.turnstileToken = token;
       return fetch(ENDPOINT, {
@@ -322,26 +461,25 @@
     }).catch(fail);
   }
 
-  /* Server validation_failed: put each message on its field and jump to the first affected step.
+  /* Server validation_failed: put each message on its field and jump to the first affected field.
      Returns false when nothing maps to a visible field, so the caller falls back to the generic error. */
   function showServerFieldErrors(data) {
     var fields = data && data.error === 'validation_failed' && data.fields;
     if (!fields) return false;
-    var first = -1;
-    FIELD_ORDER.forEach(function (k, i) {
+    var first = '';
+    FIELD_ORDER.forEach(function (k) {
       var msgs = fields[k];
       if (msgs && msgs.length) {
         setError(k, String(msgs[0]));
-        if (first === -1) first = i;
+        if (!first) first = k;
       }
     });
-    if (first === -1) return false;
-    busy = false;
-    nextBtn.disabled = false;
+    if (!first) return false;
+    resetSubmit();
     if (tsWidgetId !== null && window.turnstile) {
       try { window.turnstile.reset(tsWidgetId); tsToken = ''; } catch (e) { /* ignore */ }
     }
-    showStep(first);
+    focusField(first, true);
     return true;
   }
 
@@ -409,13 +547,16 @@
     sent = true;
     busy = false;
     card.removeChild(form);
+    /* The form was long: the next state (calendar or thank-you) starts at the top of the overlay. */
+    overlay.scrollTop = 0;
     if (!showBooking(leadId)) showThanks();
     try { if (window.track && window.track.lead) window.track.lead(); } catch (e) { /* tracking must never break the flow */ }
   }
 
   /* ---------- open / close / focus trap ---------- */
-  /* Tabbable elements inside the modal, recomputed on every Tab because steps and the
-     thank-you state swap content. The trap is bound to the overlay, which is never replaced. */
+  /* Tabbable elements inside the modal, recomputed on every Tab because the form, booking and
+     thank-you states swap content and bottleneck options disable themselves. The trap is bound to
+     the overlay, which is never replaced. */
   function focusables() {
     return Array.prototype.filter.call(
       overlay.querySelectorAll('a[href], button:not([disabled]), iframe, input:not([disabled]):not([tabindex="-1"]), select:not([disabled])'),
@@ -439,8 +580,9 @@
     overlay.classList.add('is-open');
     document.body.style.overflow = 'hidden';
     if (root) root.setAttribute('inert', '');
+    ensureTurnstile();
     if (sent) { if (doneEl) doneEl.focus(); }
-    else focusStep();
+    else focusField('fullName');
   }
 
   function close() {

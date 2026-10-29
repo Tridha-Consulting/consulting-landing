@@ -93,6 +93,23 @@
     document.head.appendChild(s);
   }
 
+  /* Start fetching Cal while the visitor is still filling the form, so mount() finds the script loaded and the
+     booking page in the browser cache. Safe to call repeatedly; does nothing without CAL_LINK. */
+  var warmed = false;
+  function warm() {
+    if (warmed || !CFG.CAL_LINK) return;
+    warmed = true;
+    try {
+      [origin(), 'https://cal.com'].forEach(function (href) {
+        document.head.appendChild(el('link', { rel: 'preconnect', href: href, crossorigin: '' }));
+      });
+    } catch (e) { /* a hint only */ }
+    loadScript(function (ok) {
+      if (!ok) return;
+      try { window.Cal('preload', { calLink: String(CFG.CAL_LINK) }); } catch (e) { /* mount() still works without it */ }
+    });
+  }
+
   /* mount(container, prefill, callbacks, options)
        prefill   { name, email, phone, company, leadId }
        callbacks { onReady({ focusWasInFallback }), onFallback(reason), onBooked() }  all optional
@@ -211,7 +228,7 @@
     }, { fallbackNode: function () { return sentence("The booking calendar didn't load."); } });
   }
 
-  window.trdBooking = { mount: mount, bookingUrl: bookingUrl };
+  window.trdBooking = { mount: mount, bookingUrl: bookingUrl, warm: warm };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', autoInit); else autoInit();
 })();

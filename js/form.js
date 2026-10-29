@@ -578,6 +578,7 @@
   function open(trigger) {
     if (!overlay) build();
     lastTrigger = trigger || document.activeElement;
+    try { if (window.trdBooking && window.trdBooking.warm) window.trdBooking.warm(); } catch (e) { /* the calendar loads at submit instead */ }
     overlay.classList.add('is-open');
     document.body.style.overflow = 'hidden';
     if (root) root.setAttribute('inert', '');

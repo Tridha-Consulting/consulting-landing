@@ -181,4 +181,14 @@ describe('js/form.js in jsdom', () => {
     const url = new URL(booking.bookingUrl({ company: 'Acme & Co', name: 'Asha' }));
     expect(url.searchParams.get('company')).toBe('Acme & Co');
   });
+
+  it('starts loading the calendar when the form opens, before submit', async () => {
+    const p = await loadPage('', 'tridha-consulting/exploration-call');
+    const booking = (p.window as unknown as { trdBooking: { warm: () => void } }).trdBooking;
+    let warmed = 0;
+    booking.warm = () => { warmed++; };
+    openForm(p);
+    expect(warmed).toBe(1);
+    expect(p.calls).toHaveLength(0);
+  });
 });

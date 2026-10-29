@@ -33,4 +33,13 @@ describe('Cal.com booking wiring', () => {
   it('never loads the Cal embed from a page script tag', () => {
     for (const page of ['index.html', 'book.html']) expect(read(page)).not.toMatch(/embed\.js/);
   });
+
+  it.each(['/js/(.*)', '/css/(.*)'])('makes browsers revalidate %s, so a deploy reaches returning visitors at once', (source) => {
+    // A 1-hour max-age kept a visitor on the previous form.js after a deploy (2026-10-29).
+    const cfg = JSON.parse(read('vercel.json')) as { headers: { source: string; headers: { key: string; value: string }[] }[] };
+    const rule = cfg.headers.find((h) => h.source === source);
+    const cc = rule?.headers.find((h) => h.key === 'Cache-Control')?.value ?? '';
+    expect(cc).toContain('max-age=0,');
+    expect(cc).toContain('must-revalidate');
+  });
 });

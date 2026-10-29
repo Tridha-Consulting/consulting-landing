@@ -1,7 +1,7 @@
 /* Single place for owner-editable settings. Empty ID = that ad tag is never loaded. */
 window.TRIDHA_CONFIG = Object.freeze({
   THANK_YOU_TEXT: 'Thank you \u2014 our team will call you shortly.',
-  BOOKED_TEXT: 'You\u2019re booked. The calendar invite is on its way to your email.',
+  BOOKED_TEXT: 'You\u2019re booked. Your confirmation and Google Meet link are on their way to your email. If you don’t see them, check the Updates or Promotions tab.',
   FALLBACK_CONTACT: 'contact@tridha.net',
   CAL_LINK: 'tridha-consulting/exploration-call', // Cal.com booking link as <user>/<event>. Empty = no booking step, the form ends with the thank-you text
   CAL_ORIGIN: 'https://app.cal.com', // embed host. A self-hosted Cal is a one-line change: set this to its origin, e.g. 'https://cal.example.com'

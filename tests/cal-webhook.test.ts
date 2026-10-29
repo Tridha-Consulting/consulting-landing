@@ -1,6 +1,6 @@
 import { createHmac, generateKeyPairSync } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { HEADERS, LAST_COLUMN_LETTER, columnLetter, toRow, type LeadRow } from '../lib/columns.js';
+import { HEADERS, LAST_COLUMN_LETTER, MANUAL_HEADERS, columnLetter, toRow, type LeadRow } from '../lib/columns.js';
 import { ANSWER_COLUMNS, parseBooking, planBooking, type Booking } from '../lib/cal-booking.js';
 import { readJsonResponse } from './helpers.js';
 
@@ -38,6 +38,11 @@ interface Call {
 
 let sheet: string[][];
 let calls: Call[];
+/** Appends to the Events tab, kept out of `calls` so the Leads-tab request counts below stay exact. */
+let eventCalls: Call[];
+let eventRows: string[][];
+/** Set to make the Events append answer with this response. */
+let eventsHandler: ((c: Call) => Response | Promise<Response>) | undefined;
 let tab = 'Leads';
 let sheetsHandler: ((c: Call) => Response | Promise<Response>) | undefined;
 
@@ -59,7 +64,13 @@ function fakeSheets(c: Call): Response {
   const prefix = `/v4/spreadsheets/${SHEET_ID}`;
   if (!path.startsWith(prefix)) throw new Error(`unexpected sheets path ${path}`);
   const rest = path.slice(prefix.length);
-  if (c.method === 'GET' && rest.startsWith('/values/')) return Response.json({ range: rest, majorDimension: 'ROWS', values: trimmed(sheet) });
+  if (c.method === 'GET' && rest.startsWith('/values/')) {
+    // Like Sheets, return only the columns of the requested range (A:<last>), so a column added to
+    // the right of ours is never seen by the code under test.
+    const last = /!A:([A-Z]+)$/.exec(rest)?.[1];
+    const width = last ? letterToIndex(last) + 1 : Infinity;
+    return Response.json({ range: rest, majorDimension: 'ROWS', values: trimmed(sheet.map((r) => r.slice(0, width))) });
+  }
   if (c.method === 'POST' && rest === '/values:batchUpdate') {
     const { valueInputOption, data } = c.body as { valueInputOption: string; data: { range: string; values: string[][] }[] };
     expect(valueInputOption).toBe('RAW');
@@ -85,6 +96,9 @@ function fakeSheets(c: Call): Response {
 beforeEach(() => {
   sheet = [[...HEADERS]];
   calls = [];
+  eventCalls = [];
+  eventRows = [];
+  eventsHandler = undefined;
   sheetsHandler = undefined;
   tab = 'Leads';
   net.fetch = async (input, init) => {
@@ -93,6 +107,12 @@ beforeEach(() => {
     const call: Call = { method: init?.method ?? 'GET', url, body: raw && raw.startsWith('{') ? JSON.parse(raw) : raw, signal: init?.signal ?? undefined };
     if (url.hostname === 'oauth2.googleapis.com') return Response.json({ access_token: 'tok', expires_in: 3600, token_type: 'Bearer' });
     if (url.hostname !== 'sheets.googleapis.com') throw new Error(`unexpected host ${url.hostname}`);
+    if (decodeURIComponent(url.pathname).includes("/values/'Events'!A1:append")) {
+      eventCalls.push(call);
+      if (eventsHandler) return eventsHandler(call);
+      eventRows.push(...(call.body as { values: string[][] }).values);
+      return Response.json({ updates: { updatedRows: 1 } });
+    }
     calls.push(call);
     return sheetsHandler ? sheetsHandler(call) : fakeSheets(call);
   };
@@ -424,6 +444,10 @@ describe('booking cancelled', () => {
     const out = await post(h, calRequest(event('BOOKING_CANCELLED', { ...p, cancellationReason: 'No longer needed' })));
     expect(out.body).toMatchObject({ matchedBy: 'email' });
     expect(sheet[1]![COL['Status']!]).toBe('Cancelled');
+    // Field names only: a live cancel's reason never reached Booking Details (2026-10-29), so the log shows where it is.
+    const synced = JSON.parse(logged(console.log as never, 'CAL_BOOKING_SYNCED')!);
+    expect(synced.payloadKeys).toContain('cancellationReason');
+    expect(JSON.stringify(synced)).not.toContain('No longer needed');
   });
 
   it('ignores a cancellation of a booking the lead has since replaced', async () => {
@@ -1320,5 +1344,174 @@ describe('header guard', () => {
     expect(out).toMatchObject({ status: 200, body: { ok: true, matchedBy: 'leadId' } });
     expect(calls.map((c) => c.method)).toEqual(['GET', 'POST']);
     expect(sheet[1]![COL['Company']!]).toBe('Rao & Co');
+  });
+});
+
+describe('event log', () => {
+  const lines = (name: string) => (console.error as never as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0])).filter((s) => s.includes(`"event":"${name}"`));
+
+  it('a created booking logs Booked: from-status the lead row held, to Booked, call time, uid, source cal', async () => {
+    sheet.push(leadRow({ 'Lead ID': 'lead-1' }));
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-1' } }))));
+    expect(eventCalls).toHaveLength(1);
+    expect(eventRows).toHaveLength(1);
+    const [at, leadId, ev, from, to, callTime, uid, source, detail] = eventRows[0]!;
+    expect(at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect([leadId, ev, from, to, callTime, uid, source, detail]).toEqual(['lead-1', 'Booked', 'New', 'Booked', '2026-11-02 15:00:00', 'bk_1', 'cal', '']);
+    expect((eventCalls[0]!.body as { values: string[][] }).values).toHaveLength(1);
+    expect(eventCalls[0]!.url.searchParams.get('valueInputOption')).toBe('RAW');
+    expect(eventCalls[0]!.url.searchParams.get('insertDataOption')).toBe('INSERT_ROWS');
+  });
+
+  it('a reschedule logs Rescheduled from Booked, with the new call time and uid', async () => {
+    sheet.push(leadRow({ 'Lead ID': 'lead-1', Status: 'Booked', 'Booking UID': 'bk_A', 'Call Time (IST)': '2026-11-02 15:00:00' }));
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_RESCHEDULED', booking({ uid: 'bk_B', rescheduleUid: 'bk_A', startTime: '2026-11-09T09:30:00Z' }))));
+    expect(eventRows).toHaveLength(1);
+    expect(eventRows[0]!.slice(1, 8)).toEqual(['lead-1', 'Rescheduled', 'Booked', 'Rescheduled', '2026-11-09 15:00:00', 'bk_B', 'cal']);
+  });
+
+  it('a cancel logs Cancelled from the prior status', async () => {
+    sheet.push(leadRow({ 'Lead ID': 'lead-1', Status: 'Rescheduled', 'Booking UID': 'bk_1' }));
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CANCELLED', booking({ cancellationReason: 'Clash' }))));
+    expect(eventRows).toHaveLength(1);
+    expect(eventRows[0]!.slice(1, 8)).toEqual(['lead-1', 'Cancelled', 'Rescheduled', 'Cancelled', '2026-11-02 15:00:00', 'bk_1', 'cal']);
+    expect(eventRows[0]![8]).toBe('');
+  });
+
+  it('a booking with no lead row appends one and logs it with the generated lead id and no prior status', async () => {
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking())));
+    expect(sheet).toHaveLength(2);
+    expect(eventRows).toHaveLength(1);
+    expect(eventRows[0]!.slice(1, 8)).toEqual(['cal-bk_1', 'Booked', '', 'Booked', '2026-11-02 15:00:00', 'bk_1', 'cal']);
+  });
+
+  it('the log is written after the sheet, as a separate request, to the Events tab', async () => {
+    sheet.push(leadRow());
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking())));
+    expect(calls.map((c) => c.method)).toEqual(['GET', 'POST']);
+    expect(decodeURIComponent(eventCalls[0]!.url.pathname)).toContain("/values/'Events'!A1:append");
+  });
+
+  it('stale events and ignored triggers log nothing', async () => {
+    sheet.push(leadRow({ Status: 'Booked', 'Booking UID': 'bk_newer', 'Last Event At': '2026-10-26T06:00:00.000Z' }));
+    const h = await loadHandler();
+    const staleCancel = await post(h, calRequest(event('BOOKING_CANCELLED', booking({ uid: 'bk_stale' }))));
+    expect(staleCancel.body).toMatchObject({ ignored: 'stale_cancellation' });
+    const staleEvent = await post(h, calRequest(event('BOOKING_CREATED', booking({ uid: 'bk_newer' }), '2026-10-25T06:00:00.000Z')));
+    expect(staleEvent.body).toMatchObject({ ignored: 'stale_event' });
+    expect((await post(h, calRequest(event('PING', {})))).status).toBe(200);
+    expect(eventCalls).toHaveLength(0);
+    expect(eventRows).toHaveLength(0);
+  });
+
+  it('a duplicate delivery of the same event logs once', async () => {
+    sheet.push(leadRow({ 'Lead ID': 'lead-1' }));
+    const h = await loadHandler();
+    const raw = JSON.stringify(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-1' } })));
+    await post(h, signedRaw(raw));
+    await post(h, signedRaw(raw));
+    expect(eventRows).toHaveLength(1);
+  });
+
+  it('a duplicate delivery of an appended booking logs once', async () => {
+    const h = await loadHandler();
+    const raw = JSON.stringify(event('BOOKING_CREATED', booking()));
+    await post(h, signedRaw(raw));
+    await post(h, signedRaw(raw));
+    expect(sheet).toHaveLength(2);
+    expect(eventRows).toHaveLength(1);
+  });
+
+  it('rejected, unsigned and refused requests log nothing', async () => {
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking()), 'unsigned'));
+    await post(h, calRequest(event('BOOKING_CREATED', { uid: 'x' })));
+    sheet = [['Wrong header']];
+    await post(h, calRequest(event('BOOKING_CREATED', booking())));
+    expect(eventCalls).toHaveLength(0);
+  });
+
+  it('a failed log write leaves the webhook at 200, the sheet updated, and logs EVENT_LOG_WRITE_FAILED', async () => {
+    sheet.push(leadRow({ 'Lead ID': 'lead-1' }));
+    eventsHandler = () => Response.json({ error: { message: 'boom' } }, { status: 500 });
+    const h = await loadHandler();
+    const out = await post(h, calRequest(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-1' } }))));
+    expect(out).toMatchObject({ status: 200, body: { ok: true, matchedBy: 'leadId' } });
+    expect(sheet[1]![COL['Status']!]).toBe('Booked');
+    expect(eventRows).toHaveLength(0);
+    expect(logged(console.log as never, 'CAL_BOOKING_SYNCED')).toBeDefined();
+    expect(logged(console.error as never, 'CAL_WEBHOOK_WRITE_FAILED')).toBeUndefined();
+    const failed = lines('EVENT_LOG_WRITE_FAILED');
+    expect(failed).toHaveLength(1);
+    expect(JSON.parse(failed[0]!)).toMatchObject({ eventName: 'Booked', leadId: 'lead-1' });
+  });
+
+  it('a hung log write cannot change the response either, and holds it back by at most 2 s', async () => {
+    sheet.push(leadRow({ 'Lead ID': 'lead-1' }));
+    eventsHandler = () => new Promise<Response>(() => {});
+    const h = await loadHandler();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      let settled = false;
+      const pending = post(h, calRequest(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-1' } })))).finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(2100);
+      expect(settled, 'the webhook was still waiting on the Events write after 2.1 s').toBe(true);
+      const out = await pending;
+      expect(out).toMatchObject({ status: 200, body: { ok: true } });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(sheet[1]![COL['Status']!]).toBe('Booked');
+    expect(JSON.parse(lines('EVENT_LOG_WRITE_FAILED')[0]!).error).toMatch(/exceeded 2000ms/);
+  });
+
+  it('a failed main write is still a 502 and logs no event', async () => {
+    sheet.push(leadRow());
+    sheetsHandler = () => Response.json({ error: { message: 'boom' } }, { status: 500 });
+    const h = await loadHandler();
+    expect((await post(h, calRequest(event('BOOKING_CREATED', booking())))).status).toBe(502);
+    expect(eventCalls).toHaveLength(0);
+  });
+});
+
+describe('team-only columns are never written by the webhook', () => {
+  const manualCells: Record<string, string> = { 'Call Outcome': 'Spoke, send deck', Qualified: 'Yes', 'Setter Notes': 'CEO, wants a pilot', 'Deal Value (₹)': '450000' };
+  const manualIndexes = MANUAL_HEADERS.map((h) => COL[h]!);
+
+  it.each(['BOOKING_CREATED', 'BOOKING_RESCHEDULED', 'BOOKING_CANCELLED'])('%s leaves filled team cells exactly as they were, and addresses none of them', async (trigger) => {
+    sheet.push(leadRow({ 'Lead ID': 'lead-1', Status: 'Booked', 'Booking UID': 'bk_1', ...manualCells }));
+    const h = await loadHandler();
+    const out = await post(h, calRequest(event(trigger, booking({ metadata: { leadId: 'lead-1' }, responses: { company: { value: 'Rao & Co' }, designation: { value: 'CEO' } } }))));
+    expect(out.status).toBe(200);
+    for (const header of MANUAL_HEADERS) expect(sheet[1]![COL[header]!], header).toBe(manualCells[header]);
+    const batch = calls.find((c) => c.url.pathname.endsWith(':batchUpdate'))!.body as { data: { range: string }[] };
+    const written = batch.data.map((d) => letterToIndex(/!([A-Z]+)\d+$/.exec(d.range)![1]!));
+    expect(written.length).toBeGreaterThan(0);
+    for (const i of written) expect(manualIndexes, `column ${columnLetter(i)}`).not.toContain(i);
+  });
+
+  it('a booking that creates a row writes them blank', async () => {
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CREATED', booking())));
+    for (const header of MANUAL_HEADERS) expect(sheet[1]![COL[header]!], header).toBe('');
+    expect(sheet[1]).toHaveLength(HEADERS.length);
+  });
+
+  it('a column added to the right of ours is neither read nor written', async () => {
+    sheet = [[...HEADERS, 'Follow-up date'], [...leadRow({ 'Lead ID': 'lead-1' }), '2026-11-20']];
+    const h = await loadHandler();
+    const out = await post(h, calRequest(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-1' } }))));
+    expect(out).toMatchObject({ status: 200, body: { ok: true, matchedBy: 'leadId' } });
+    expect(sheet[1]![HEADERS.length]).toBe('2026-11-20');
+    expect(sheet[1]![COL['Status']!]).toBe('Booked');
+    expect(decodeURIComponent(calls[0]!.url.pathname)).toContain(`!A:${LAST_COLUMN_LETTER}`);
+    expect(LAST_COLUMN_LETTER).toBe('AN');
   });
 });

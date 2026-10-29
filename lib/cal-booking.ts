@@ -39,6 +39,13 @@ export function statusFor(trigger: BookingTrigger): string {
   return STATUS.cancelled;
 }
 
+/** The Events-tab wording for a trigger. */
+export function eventNameFor(trigger: BookingTrigger): string {
+  if (trigger === 'BOOKING_CREATED') return 'Booked';
+  if (trigger === 'BOOKING_RESCHEDULED') return 'Rescheduled';
+  return 'Cancelled';
+}
+
 // Sheets rejects a cell over 50,000 characters, which would make the write fail on every retry.
 const MAX_DETAILS_CHARS = 45_000;
 const TRUNCATED = '… (truncated)';

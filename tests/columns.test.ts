@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { BOTTLENECK_OPTIONS } from '../lib/schema.js';
-import { COLUMNS, HEADERS, LAST_COLUMN_LETTER, columnIndex, columnLetter, formatIST, toRow, type LeadRow } from '../lib/columns.js';
+import {
+  COLUMNS,
+  HEADERS,
+  LAST_COLUMN_LETTER,
+  MANUAL_HEADERS,
+  SheetLayoutError,
+  assertSheetLayout,
+  columnIndex,
+  columnLetter,
+  formatIST,
+  toRow,
+  type LeadRow,
+} from '../lib/columns.js';
 
 const lead: LeadRow = {
   fullName: 'Asha Rao',
@@ -20,7 +32,7 @@ const lead: LeadRow = {
 describe('columns', () => {
   it('has one value per header', () => {
     expect(toRow(lead)).toHaveLength(HEADERS.length);
-    expect(COLUMNS).toHaveLength(32);
+    expect(COLUMNS).toHaveLength(40);
   });
 
   it('orders headers as specified', () => {
@@ -29,8 +41,13 @@ describe('columns', () => {
       'Designation', 'Company', 'Website', 'Annual Revenue', 'Budget (3-6 Months)', 'Bottleneck', 'Tech Team',
       'Timeline', 'Decision Maker', 'Booking Details', 'UTM Source', 'UTM Medium', 'UTM Campaign', 'UTM Content',
       'UTM Term', 'fbclid', 'gclid', 'li_fat_id', 'Referrer', 'Landing URL', 'User Agent', 'IP', 'Lead ID',
-      'Booking UID', 'Last Event At',
+      'Booking UID', 'Last Event At', 'Channel', 'twclid', 'gbraid', 'wbraid', 'Call Outcome', 'Qualified', 'Setter Notes', 'Deal Value (₹)',
     ]);
+  });
+
+  it('only ever appends: the first 32 headers are the layout the live sheet already holds', () => {
+    expect(HEADERS.slice(0, 32).at(-1)).toBe('Last Event At');
+    expect(HEADERS.slice(32)).toEqual(['Channel', 'twclid', 'gbraid', 'wbraid', ...MANUAL_HEADERS]);
   });
 
   it('maps values to the right columns, blank when absent', () => {
@@ -39,6 +56,7 @@ describe('columns', () => {
       '', '', '', '', '', '', '', '', '', '',
       'meta', '', 'oct', '', '', '', 'G1', '', 'https://l.facebook.com/', 'https://consulting.tridha.net/',
       'UA/1.0', '203.0.113.9', '11111111-1111-4111-8111-111111111111', '', '',
+      'Google Ads', '', '', '', '', '', '', '',
     ]);
   });
 
@@ -70,7 +88,30 @@ describe('columns', () => {
     expect(at('Status')).toBe('New');
     expect(at('Booking Details')).toBe('');
     expect(at('Lead ID')).toBe(lead.leadId);
-    expect(row).toHaveLength(32);
+    expect(row).toHaveLength(40);
+  });
+
+  it('puts gbraid and wbraid right after twclid and before the team columns, and writes them', () => {
+    expect(columnIndex('gbraid')).toBe(columnIndex('twclid') + 1);
+    expect(columnIndex('wbraid')).toBe(columnIndex('twclid') + 2);
+    expect(columnIndex('Call Outcome')).toBe(columnIndex('wbraid') + 1);
+    const row = toRow({ ...lead, gclid: undefined, gbraid: 'GB1', wbraid: 'WB1' });
+    expect(row[columnIndex('gbraid')]).toBe('GB1');
+    expect(row[columnIndex('wbraid')]).toBe('WB1');
+    expect(row[columnIndex('Channel')]).toBe('Google Ads');
+    expect(toRow(lead)[columnIndex('gbraid')]).toBe('');
+  });
+
+  it('writes the click id and the classified channel, and the four team columns blank', () => {
+    const row = toRow({ ...lead, gclid: undefined, twclid: 'TW1', utmSource: undefined, referrer: undefined });
+    expect(row[columnIndex('twclid')]).toBe('TW1');
+    expect(row[columnIndex('Channel')]).toBe('X Ads');
+    for (const h of MANUAL_HEADERS) expect(row[columnIndex(h)]).toBe('');
+  });
+
+  it('keeps the four team columns last, after every column the code fills', () => {
+    expect(MANUAL_HEADERS).toEqual(['Call Outcome', 'Qualified', 'Setter Notes', 'Deal Value (₹)']);
+    expect(HEADERS.slice(-4)).toEqual([...MANUAL_HEADERS]);
   });
 
   it('joins a single bottleneck without a separator', () => {
@@ -98,11 +139,70 @@ describe('columns', () => {
     expect(columnIndex('Status')).toBe(4);
     expect(columnIndex('Booked At (IST)')).toBe(6);
     expect(columnIndex('Booking UID')).toBe(30);
+    expect(columnIndex('Channel')).toBe(32);
     expect(() => columnIndex('Nope')).toThrow(/unknown sheet column/);
-    expect(LAST_COLUMN_LETTER).toBe('AF');
+    expect(LAST_COLUMN_LETTER).toBe('AN');
   });
 
   it('converts indexes to A1 letters past Z', () => {
     expect([0, 4, 25, 26, 27, 51, 52, 701, 702].map(columnLetter)).toEqual(['A', 'E', 'Z', 'AA', 'AB', 'AZ', 'BA', 'ZZ', 'AAA']);
+  });
+});
+
+describe('assertSheetLayout', () => {
+  it('accepts exactly our headers, with stray spaces in the cells', () => {
+    expect(() => assertSheetLayout(HEADERS)).not.toThrow();
+    expect(() => assertSheetLayout(HEADERS.map((h) => ` ${h} `))).not.toThrow();
+  });
+
+  it('accepts extra columns after the last of ours, named or empty', () => {
+    expect(() => assertSheetLayout([...HEADERS, 'Follow-up date'])).not.toThrow();
+    expect(() => assertSheetLayout([...HEADERS, '', 'Another', ''])).not.toThrow();
+    expect(() => assertSheetLayout([...HEADERS, '', ''])).not.toThrow();
+  });
+
+  it('refuses a column inserted in the middle, whatever it is called', () => {
+    for (const at of [0, 5, 20, HEADERS.length - 1]) {
+      const row = [...HEADERS.slice(0, at), 'Inserted', ...HEADERS.slice(at)];
+      expect(() => assertSheetLayout(row), `insert at ${at}`).toThrow(SheetLayoutError);
+    }
+    // An insert whose text equals a header of ours is still a shift.
+    expect(() => assertSheetLayout([...HEADERS.slice(0, 3), 'Status', ...HEADERS.slice(3)])).toThrow(SheetLayoutError);
+  });
+
+  it('names the first position that differs', () => {
+    const row = [...HEADERS.slice(0, 5), 'Inserted', ...HEADERS.slice(5)];
+    expect(() => assertSheetLayout(row)).toThrow(/column F \(position 6\): expected "Call Time \(IST\)", found \(other text, 8 characters\)/);
+  });
+
+  it('refuses a missing column, at the end or in the middle', () => {
+    expect(() => assertSheetLayout(HEADERS.slice(0, -1))).toThrow(/column AN \(position 40\): expected "Deal Value \(\u20B9\)", found \(empty\)/);
+    expect(() => assertSheetLayout(HEADERS.slice(0, 32))).toThrow(/position 33\): expected "Channel"/);
+    expect(() => assertSheetLayout([...HEADERS.slice(0, 7), ...HEADERS.slice(8)])).toThrow(SheetLayoutError);
+  });
+
+  it('refuses a renamed or reordered column', () => {
+    const renamed = [...HEADERS];
+    renamed[8] = 'Compnay';
+    expect(() => assertSheetLayout(renamed)).toThrow(SheetLayoutError);
+    const swapped = [...HEADERS];
+    [swapped[1], swapped[2]] = [swapped[2]!, swapped[1]!];
+    expect(() => assertSheetLayout(swapped)).toThrow(SheetLayoutError);
+  });
+
+  it('refuses a missing or empty header row', () => {
+    expect(() => assertSheetLayout(undefined)).toThrow(/no header row/);
+    expect(() => assertSheetLayout([])).toThrow(/no header row/);
+  });
+
+  it('never quotes text that is not one of our headers', () => {
+    const row = [...HEADERS];
+    row[3] = 'asha@example.com';
+    try {
+      assertSheetLayout(row);
+      expect.unreachable();
+    } catch (e) {
+      expect((e as Error).message).not.toContain('asha@example.com');
+    }
   });
 });

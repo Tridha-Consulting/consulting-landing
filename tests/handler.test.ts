@@ -6,6 +6,12 @@ import { makeRequest, readJsonResponse, validBody } from './helpers.js';
 
 const write = vi.fn();
 vi.mock('../lib/sinks/index.js', () => ({ sinks: [{ name: 'test', write: (l: unknown) => write(l) }] }));
+// The audit log has its own tests (tests/event-log.test.ts); here only what the handler hands it is checked.
+const logEvents = vi.fn();
+vi.mock('../lib/event-log.js', async (importActual) => ({
+  ...(await importActual<typeof import('../lib/event-log.js')>()),
+  logEvents: (e: unknown, o: unknown) => logEvents(e, o),
+}));
 
 let errSpy: ReturnType<typeof vi.spyOn>;
 let logSpy: ReturnType<typeof vi.spyOn>;
@@ -13,6 +19,8 @@ let logSpy: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   write.mockReset();
   write.mockResolvedValue(undefined);
+  logEvents.mockReset();
+  logEvents.mockResolvedValue(undefined);
   errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
   logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 });
@@ -76,7 +84,7 @@ describe('POST /api/lead', () => {
   });
 
   it('accepts the largest valid body, for ASCII and for multi-byte text', async () => {
-    const attributionKeys = ['utmSource', 'utmMedium', 'utmCampaign', 'utmContent', 'utmTerm', 'fbclid', 'gclid', 'liFatId', 'referrer', 'landingUrl'];
+    const attributionKeys = ['utmSource', 'utmMedium', 'utmCampaign', 'utmContent', 'utmTerm', 'fbclid', 'gclid', 'liFatId', 'twclid', 'gbraid', 'wbraid', 'referrer', 'landingUrl'];
     const [b1, b2] = [...BOTTLENECK_OPTIONS].sort((a, b) => b.length - a.length);
     for (const ch of ['a', 'ह']) {
       const body = {
@@ -92,8 +100,8 @@ describe('POST /api/lead', () => {
         turnstileToken: 't'.repeat(2048),
       };
       const raw = JSON.stringify(body);
-      // MAX_BODY_BYTES is 24 KiB; the multi-byte body is well past the 10 KiB the endpoint started with.
-      expect(Buffer.byteLength(raw), ch).toBeLessThanOrEqual(24 * 1024);
+      // MAX_BODY_BYTES is 32 KiB; the multi-byte body is well past the 10 KiB the endpoint started with.
+      expect(Buffer.byteLength(raw), ch).toBeLessThanOrEqual(32 * 1024);
       if (ch !== 'a') expect(Buffer.byteLength(raw)).toBeGreaterThan(10 * 1024);
       write.mockClear();
       const out = await call('POST', raw);
@@ -120,12 +128,12 @@ describe('POST /api/lead', () => {
 
   it('rejects malformed JSON with 400 and an oversize body with 413', async () => {
     expect((await call('POST', '{not json')).statusCode).toBe(400);
-    expect((await call('POST', { ...validBody, referrer: 'x'.repeat(25 * 1024) })).statusCode).toBe(413);
+    expect((await call('POST', { ...validBody, referrer: 'x'.repeat(33 * 1024) })).statusCode).toBe(413);
     expect(write).not.toHaveBeenCalled();
   });
 
   it('413 up front from Content-Length, without reading the body', async () => {
-    const req = makeRequest('POST', validBody, { 'content-length': String(25 * 1024) });
+    const req = makeRequest('POST', validBody, { 'content-length': String(33 * 1024) });
     const textSpy = vi.spyOn(req, 'text');
     const res = await handlers.POST!(req);
     expect(res.status).toBe(413);
@@ -169,6 +177,39 @@ describe('POST /api/lead', () => {
     expect(write).toHaveBeenCalledTimes(1);
     expect(write.mock.calls[0]![0]).toMatchObject({ leadId: body.leadId, ip: '203.0.113.9', userAgent: 'UA/1' });
     expect(JSON.parse(String(logSpy.mock.calls[0]![0]))).toEqual({ event: 'LEAD_WRITTEN', leadId: body.leadId });
+  });
+});
+
+describe('POST /api/lead audit event', () => {
+  it('hands one Lead submitted event to the log after the write, with the Channel as Detail', async () => {
+    const out = await call('POST', { ...validBody, utmSource: 'google', utmMedium: 'cpc' });
+    const { leadId } = out.body as { leadId: string };
+    expect(logEvents).toHaveBeenCalledTimes(1);
+    expect(logEvents).toHaveBeenCalledWith([{ event: 'Lead submitted', source: 'form', leadId, statusTo: 'New', detail: 'Google Ads' }], { deadlineMs: 2000 });
+    expect(write.mock.invocationCallOrder[0]).toBeLessThan(logEvents.mock.invocationCallOrder[0]!);
+  });
+
+  it('classifies an X click id and a bare visit', async () => {
+    await call('POST', { ...validBody, utmSource: undefined, twclid: 'T1' });
+    expect(logEvents.mock.calls[0]![0][0].detail).toBe('X Ads');
+    logEvents.mockClear();
+    await call('POST', { ...validBody, utmSource: undefined, landingUrl: undefined });
+    expect(logEvents.mock.calls[0]![0][0].detail).toBe('Direct');
+  });
+
+  it('writes the channel and click id to the row', async () => {
+    await call('POST', { ...validBody, utmSource: undefined, twclid: 'T1' });
+    const row = toRow(write.mock.calls[0]![0] as Parameters<typeof toRow>[0]);
+    expect(row.slice(-8)).toEqual(['X Ads', 'T1', '', '', '', '', '', '']);
+  });
+
+  it('no event when the lead is not stored: write failure, validation failure, honeypot', async () => {
+    write.mockRejectedValue(new Error('sheets down'));
+    expect((await call('POST', validBody)).statusCode).toBe(502);
+    write.mockResolvedValue(undefined);
+    expect((await call('POST', { ...validBody, email: 'nope' })).statusCode).toBe(400);
+    expect((await call('POST', { ...validBody, company_website: 'http://spam' })).statusCode).toBe(200);
+    expect(logEvents).not.toHaveBeenCalled();
   });
 });
 

@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { isHandledTrigger, parseBooking } from '../lib/cal-booking.js';
+import { eventNameFor, isHandledTrigger, parseBooking } from '../lib/cal-booking.js';
 import { SheetLayoutError } from '../lib/columns.js';
+import { EVENT_LOG_DEADLINE_MS, logEvents } from '../lib/event-log.js';
 
 // Cal.com booking webhooks -> the lead's row in the Sheet. Web-standard handler like api/lead.ts:
 // the raw body is read once because the signature is over the exact bytes Cal sent.
@@ -89,7 +90,26 @@ export async function POST(request: Request): Promise<Response> {
       console.log(JSON.stringify({ event: 'CAL_WEBHOOK_STALE', uid: booking.booking.uid, trigger, reason: out.stale, matchedBy: out.matchedBy, row: out.row, ...(out.warn && { warn: out.warn }) }));
       return json(200, { ok: true, ignored: out.stale });
     }
-    console.log(JSON.stringify({ event: 'CAL_BOOKING_SYNCED', uid: booking.booking.uid, trigger, matchedBy: out.matchedBy, row: out.row, ...(out.warn && { warn: out.warn }), ...(out.unmapped && { unmapped: out.unmapped }) }));
+    // payloadKeys on a cancel: field names only, because a live cancellation reason never reached Booking Details.
+    console.log(JSON.stringify({ event: 'CAL_BOOKING_SYNCED', uid: booking.booking.uid, trigger, matchedBy: out.matchedBy, row: out.row, ...(out.warn && { warn: out.warn }), ...(out.unmapped && { unmapped: out.unmapped }), ...(trigger === 'BOOKING_CANCELLED' && { payloadKeys: Object.keys(body.payload as object) }) }));
+    // Best-effort audit row, after the sheet is already updated; logEvents never throws, and the deadline
+    // caps the time a stuck Events write can add to the response.
+    if (out.change) {
+      await logEvents(
+        [
+          {
+            event: eventNameFor(trigger),
+            source: 'cal',
+            leadId: out.change.leadId,
+            statusFrom: out.change.statusFrom,
+            statusTo: out.change.statusTo,
+            callTime: out.change.callTime,
+            bookingUid: out.change.uid,
+          },
+        ],
+        { deadlineMs: EVENT_LOG_DEADLINE_MS },
+      );
+    }
     return json(200, { ok: true, matchedBy: out.matchedBy });
   } catch (err) {
     if (err instanceof SheetLayoutError) {

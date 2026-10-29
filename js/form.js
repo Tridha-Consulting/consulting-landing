@@ -5,7 +5,7 @@
   var CFG = window.TRIDHA_CONFIG || {};
   var ENDPOINT = '/api/lead';
   var ATTR_KEY = 'tridha_attribution';
-  var ATTR_PARAMS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid', 'gclid', 'li_fat_id'];
+  var ATTR_PARAMS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid', 'gclid', 'li_fat_id', 'twclid', 'gbraid', 'wbraid'];
 
   /* Same rule names as lib/schema.ts (fullName, email, phone, designation, company, website, attribution).
      email.pattern is a copy of zod's email regex used by lib/schema.ts (z.regexes.email); the server
@@ -116,7 +116,7 @@
     return {
       utmSource: a.utm_source, utmMedium: a.utm_medium, utmCampaign: a.utm_campaign,
       utmContent: a.utm_content, utmTerm: a.utm_term, fbclid: a.fbclid, gclid: a.gclid,
-      liFatId: a.li_fat_id, referrer: a.referrer, landingUrl: a.landing_url
+      liFatId: a.li_fat_id, twclid: a.twclid, gbraid: a.gbraid, wbraid: a.wbraid, referrer: a.referrer, landingUrl: a.landing_url
     };
   }
 

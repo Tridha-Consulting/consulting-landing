@@ -16,6 +16,8 @@ function load() {
     privateKey: process.env.GOOGLE_PRIVATE_KEY!.trim().replace(/^"|"$/g, '').replace(/\\n/g, '\n'),
     sheetId: process.env.SHEET_ID!.trim(),
     sheetTab: process.env.SHEET_TAB?.trim() || 'Leads',
+    // The audit-log tab (lib/event-log.ts).
+    eventsTab: process.env.EVENTS_TAB?.trim() || 'Events',
   };
 }
 

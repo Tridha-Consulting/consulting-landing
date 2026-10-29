@@ -30,10 +30,22 @@ export interface Call {
 interface FakeState {
   sheet: string[][];
   sheetCalls: Call[];
+  /** Appends to the Events tab; kept apart from sheetCalls so tests of the Leads tab count only their own requests. */
+  eventCalls: Call[];
+  /** Rows appended to the Events tab. */
+  eventRows: string[][];
   calendarCalls: Call[];
   events: CalendarEvent[];
   pageSize: number;
   failSheets: boolean;
+  /** Make appends to the Events tab fail with a 500, leaving the Leads tab working. */
+  failEvents: boolean;
+  /** Make appends to the Events tab never answer. */
+  hangEvents: boolean;
+  /** Make appends to the Events tab answer with this HTTP status (e.g. 400 for a missing tab); 0 leaves them working. */
+  eventsStatus: number;
+  /** OAuth token requests so far: a new JWT client fetches one, a reused client reuses its cached token. */
+  tokenCalls: number;
   failList: boolean;
   failWatch: boolean;
 }
@@ -42,6 +54,8 @@ export const fake: FakeState = (globalThis as { __calendarFake?: FakeState }).__
   sheet: [] as string[][],
   /** Calls to sheets.googleapis.com. */
   sheetCalls: [] as Call[],
+  eventCalls: [] as Call[],
+  eventRows: [] as string[][],
   /** Calls to the Calendar API. */
   calendarCalls: [] as Call[],
   /** Events the Calendar list call returns, split into pages of `pageSize`. */
@@ -49,6 +63,10 @@ export const fake: FakeState = (globalThis as { __calendarFake?: FakeState }).__
   pageSize: 250,
   /** Set to make a whole API fail with a 500. */
   failSheets: false,
+  failEvents: false,
+  hangEvents: false,
+  eventsStatus: 0,
+  tokenCalls: 0,
   failList: false,
   failWatch: false,
 };
@@ -56,12 +74,31 @@ export const fake: FakeState = (globalThis as { __calendarFake?: FakeState }).__
 export function resetFakes(): void {
   fake.sheet = [[...HEADERS]];
   fake.sheetCalls = [];
+  fake.eventCalls = [];
+  fake.eventRows = [];
   fake.calendarCalls = [];
   fake.events = [];
   fake.pageSize = 250;
   fake.failSheets = false;
+  fake.failEvents = false;
+  fake.hangEvents = false;
+  fake.eventsStatus = 0;
+  fake.tokenCalls = 0;
   fake.failList = false;
   fake.failWatch = false;
+}
+
+/** The Events tab's name as the code under test resolves it. */
+function eventsTabName(): string {
+  return process.env.EVENTS_TAB?.trim() || 'Events';
+}
+
+/** The tab an append addresses, unquoted; undefined for any other request. */
+function appendTab(url: URL): string | undefined {
+  const m = /\/values\/(.+)!A1:append$/.exec(decodeURIComponent(url.pathname));
+  if (!m) return undefined;
+  const tab = m[1]!;
+  return tab.startsWith("'") && tab.endsWith("'") ? tab.slice(1, -1).replace(/''/g, "'") : tab;
 }
 
 function letterToIndex(letters: string): number {
@@ -77,13 +114,30 @@ function trimmed(rows: string[][]): string[][] {
   });
 }
 
+/** An append to the Events tab: stored apart from the Leads sheet. */
+function eventsAppend(c: Call): Response {
+  if (fake.eventsStatus) return Response.json({ error: { code: fake.eventsStatus, message: "Unable to parse range: 'Events'!A1" } }, { status: fake.eventsStatus });
+  if (fake.failEvents || fake.failSheets) return new Response('{"error":{"message":"boom"}}', { status: 500 });
+  if (c.url.searchParams.get('valueInputOption') !== 'RAW') throw new Error('events append must be RAW');
+  if (c.url.searchParams.get('insertDataOption') !== 'INSERT_ROWS') throw new Error('events append must INSERT_ROWS');
+  const { values } = c.body as { values: string[][] };
+  fake.eventRows.push(...values);
+  return Response.json({ updates: { updatedRows: values.length } });
+}
+
 function sheets(c: Call): Response {
   if (fake.failSheets) return new Response('{"error":{"message":"boom"}}', { status: 500 });
   const path = decodeURIComponent(c.url.pathname);
   const prefix = `/v4/spreadsheets/${SHEET_ID}`;
   if (!path.startsWith(prefix)) throw new Error(`unexpected sheets path ${path}`);
   const rest = path.slice(prefix.length);
-  if (c.method === 'GET' && rest.startsWith('/values/')) return Response.json({ range: rest, majorDimension: 'ROWS', values: trimmed(fake.sheet) });
+  if (c.method === 'GET' && rest.startsWith('/values/')) {
+    // Like Sheets, return only the columns of the requested range (A:<last>), so a column added to
+    // the right of ours is never seen by the code under test.
+    const last = /!A:([A-Z]+)$/.exec(rest)?.[1];
+    const width = last ? letterToIndex(last) + 1 : Infinity;
+    return Response.json({ range: rest, majorDimension: 'ROWS', values: trimmed(fake.sheet.map((r) => r.slice(0, width))) });
+  }
   if (c.method === 'POST' && rest === '/values:batchUpdate') {
     const { valueInputOption, data } = c.body as { valueInputOption: string; data: { range: string; values: string[][] }[] };
     if (valueInputOption !== 'RAW') throw new Error(`valueInputOption ${valueInputOption}`);
@@ -96,6 +150,11 @@ function sheets(c: Call): Response {
       row[col] = values[0]![0]!;
     }
     return Response.json({ totalUpdatedCells: data.length });
+  }
+  if (c.method === 'POST' && rest === '/values/Leads!A1:append') {
+    const { values } = c.body as { values: string[][] };
+    fake.sheet.push(values[0]!);
+    return Response.json({ updates: { updatedRange: `'Leads'!A${fake.sheet.length}` } });
   }
   throw new Error(`unexpected sheets request ${c.method} ${rest}`);
 }
@@ -121,8 +180,16 @@ export async function fakeFetch(input: unknown, init?: RequestInit): Promise<Res
   const url = new URL(String(input));
   const raw = String(init?.body ?? '');
   const call: Call = { method: init?.method ?? 'GET', url, body: raw.startsWith('{') ? JSON.parse(raw) : raw };
-  if (url.hostname === 'oauth2.googleapis.com') return Response.json({ access_token: 'tok', expires_in: 3600, token_type: 'Bearer' });
+  if (url.hostname === 'oauth2.googleapis.com') {
+    fake.tokenCalls++;
+    return Response.json({ access_token: 'tok', expires_in: 3600, token_type: 'Bearer' });
+  }
   if (url.hostname === 'sheets.googleapis.com') {
+    // Routed by tab name, however the request quotes it: the Events tab apart from the Leads tab.
+    if (appendTab(url) === eventsTabName()) {
+      fake.eventCalls.push(call);
+      return fake.hangEvents ? new Promise<Response>(() => {}) : eventsAppend(call);
+    }
     fake.sheetCalls.push(call);
     return sheets(call);
   }

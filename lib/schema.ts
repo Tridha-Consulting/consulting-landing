@@ -117,6 +117,9 @@ export const leadSchema = z.object({
   fbclid: attr,
   gclid: attr,
   liFatId: attr,
+  twclid: attr,
+  gbraid: attr,
+  wbraid: attr,
   referrer: attr,
   landingUrl: attr,
 });

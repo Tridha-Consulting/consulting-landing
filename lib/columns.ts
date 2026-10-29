@@ -1,3 +1,4 @@
+import { classifyChannel } from './channel.js';
 import { BOTTLENECK_OPTIONS, type LeadInput } from './schema.js';
 
 /** Qualification answers. A lead from the site form always has them; a row built from a Cal booking alone may not. */
@@ -37,6 +38,8 @@ export const STATUS = {
  * While the sheet holds no data rows the layout may be reordered freely. Once it does, columns are
  * only ever appended: reordering would misalign every existing row against the new headers.
  * Call, booking and event columns are filled by /api/cal-webhook; a fresh lead from /api/lead leaves them blank.
+ * The last four columns (MANUAL_HEADERS) belong to the team: the code writes them blank on a new row
+ * and no updater ever addresses them.
  */
 export const COLUMNS: readonly Column[] = [
   { header: 'Submitted At (IST)', value: (l) => formatIST(l.submittedAt) },
@@ -78,9 +81,23 @@ export const COLUMNS: readonly Column[] = [
   { header: 'Booking UID', value: () => '' },
   // `createdAt` of the last webhook event applied, so a late or replayed older event is ignored.
   { header: 'Last Event At', value: () => '' },
+  // Where the lead came from, derived from the attribution columns by lib/channel.ts when the row is written.
+  { header: 'Channel', value: (l) => classifyChannel(l) },
+  { header: 'twclid', value: (l) => l.twclid ?? '' },
+  // Google Ads click ids for iOS traffic that cannot carry a gclid: gbraid (app-to-web) and wbraid (web-to-app).
+  { header: 'gbraid', value: (l) => l.gbraid ?? '' },
+  { header: 'wbraid', value: (l) => l.wbraid ?? '' },
+  // Team-only columns: written blank, never touched by /api/lead, /api/cal-webhook or the calendar sync.
+  { header: 'Call Outcome', value: () => '' },
+  { header: 'Qualified', value: () => '' },
+  { header: 'Setter Notes', value: () => '' },
+  { header: 'Deal Value (₹)', value: () => '' },
 ];
 
 export const HEADERS: string[] = COLUMNS.map((c) => c.header);
+
+/** The columns the team fills by hand. No code path may write them after the row is appended; the describe blocks "team-only columns are never written by the webhook" (tests/cal-webhook.test.ts) and "team-only columns and trailing columns" (tests/calendar-sync.test.ts) hold that. */
+export const MANUAL_HEADERS: readonly string[] = ['Call Outcome', 'Qualified', 'Setter Notes', 'Deal Value (₹)'];
 
 export function toRow(lead: LeadRow): string[] {
   return COLUMNS.map((c) => c.value(lead));
@@ -105,7 +122,7 @@ export function columnLetter(index: number): string {
   return out;
 }
 
-/** Letter of the last column, so ranges like `A:AF` follow the layout instead of hard-coding it. */
+/** Letter of the last column, so ranges like `A:AN` follow the layout instead of hard-coding it. Reads stop here, so a column the team adds to the right is never read. */
 export const LAST_COLUMN_LETTER = columnLetter(HEADERS.length - 1);
 
 /** The sheet's first row is not the header row this code was written against. */
@@ -117,22 +134,25 @@ export class SheetLayoutError extends Error {
 }
 
 /**
- * Throws unless `firstRow` is exactly HEADERS (cells trimmed, same length). Writes address cells by
- * the position of a header, so against a sheet in another layout they would land in the wrong
- * columns. The message names headers and positions only, never row data: a tab with no header row
+ * Throws unless the first HEADERS.length cells of `firstRow` are exactly HEADERS (cells trimmed).
+ * Writes address cells by the position of a header, so against a sheet in another layout they
+ * would land in the wrong columns. Anything within our columns that differs (missing, renamed,
+ * reordered, inserted in the middle) throws. Cells after the last of our columns are not looked at:
+ * a team member may add a column at the far right, and reads stop at LAST_COLUMN_LETTER so it is
+ * never read or written. Once the sheet holds data rows our columns are still append-only (see
+ * COLUMNS). The message names headers and positions only, never row data: a tab with no header row
  * has a lead there, so a found header is quoted only when it is one of ours.
  */
 export function assertSheetLayout(firstRow: readonly string[] | undefined): void {
   if (!firstRow || firstRow.length === 0) {
     throw new SheetLayoutError('sheet layout mismatch: the tab has no header row; run npm run sheet-headers and paste it into A1');
   }
-  const found = firstRow.map((c) => String(c ?? '').trim());
-  const width = Math.max(found.length, HEADERS.length);
-  for (let i = 0; i < width; i++) {
+  const found = firstRow.slice(0, HEADERS.length).map((c) => String(c ?? '').trim());
+  for (let i = 0; i < HEADERS.length; i++) {
     if (found[i] === HEADERS[i]) continue;
     const shown = found[i] === undefined || found[i] === '' ? '(empty)' : HEADERS.includes(found[i]!) ? `"${found[i]}"` : `(other text, ${found[i]!.length} characters)`;
     throw new SheetLayoutError(
-      `sheet layout mismatch at column ${columnLetter(i)} (position ${i + 1}): expected ${HEADERS[i] === undefined ? '(nothing)' : `"${HEADERS[i]}"`}, found ${shown}; the header row must equal npm run sheet-headers`,
+      `sheet layout mismatch at column ${columnLetter(i)} (position ${i + 1}): expected "${HEADERS[i]}", found ${shown}; the first ${HEADERS.length} header cells must equal npm run sheet-headers (columns added after ${LAST_COLUMN_LETTER} are fine)`,
     );
   }
 }

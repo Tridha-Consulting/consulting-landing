@@ -401,3 +401,57 @@ describe('syncCalendarEvents', () => {
     });
   });
 });
+
+describe('team-only columns and trailing columns', () => {
+  beforeEach(() => {
+    resetFakes();
+    vi.resetModules();
+    vi.stubEnv('GOOGLE_SERVICE_ACCOUNT_EMAIL', 'lead-writer@proj.iam.gserviceaccount.com');
+    vi.stubEnv('GOOGLE_PRIVATE_KEY', privateKey);
+    vi.stubEnv('SHEET_ID', SHEET_ID);
+    vi.stubEnv('SHEET_TAB', 'Leads');
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  const manual: Record<string, string> = { 'Call Outcome': 'No answer', Qualified: 'Maybe', 'Setter Notes': 'Call back Tue', 'Deal Value (₹)': '120000' };
+  const fill = (row: string[]) => {
+    for (const [h, v] of Object.entries(manual)) row[COL[h]!] = v;
+    return row;
+  };
+
+  it('a decline and a re-accept leave filled team cells untouched and write only the Status column', async () => {
+    fake.sheet.push(fill(leadRow({ status: STATUS.booked, uid: 'u1', email: 'a@example.com' })), fill(leadRow({ status: STATUS.declined, uid: 'u2', email: 'b@example.com' })));
+    const { syncCalendarEvents } = await import('../lib/calendar-sync.js');
+    const out = await syncCalendarEvents([
+      calEvent({ uid: 'u1', booker: 'a@example.com', response: 'declined' }),
+      calEvent({ uid: 'u2', booker: 'b@example.com', response: 'accepted' }),
+    ]);
+    expect(out.changes).toHaveLength(2);
+    for (const r of [1, 2]) for (const [h, v] of Object.entries(manual)) expect(fake.sheet[r]![COL[h]!], `${h} row ${r + 1}`).toBe(v);
+    const batch = fake.sheetCalls.find((c) => c.method === 'POST')!.body as { data: { range: string }[] };
+    for (const d of batch.data) expect(d.range).toMatch(/^'Leads'!E\d+$/);
+  });
+
+  it('a column added to the right of ours is neither read nor touched', async () => {
+    fake.sheet[0] = [...HEADERS, 'Follow-up date'];
+    fake.sheet.push([...leadRow({ status: STATUS.booked, uid: 'u1' }), '2026-11-20']);
+    const { syncCalendarEvents } = await import('../lib/calendar-sync.js');
+    const out = await syncCalendarEvents([calEvent({ uid: 'u1', response: 'declined' })]);
+    expect(out.changes).toHaveLength(1);
+    expect(fake.sheet[1]![HEADERS.length]).toBe('2026-11-20');
+    expect(fake.sheet[1]![COL['Status']!]).toBe('Declined');
+    expect(decodeURIComponent(fake.sheetCalls[0]!.url.pathname)).toContain('!A:AN');
+  });
+
+  it('a middle insert is refused before any write', async () => {
+    fake.sheet[0] = [...HEADERS.slice(0, 10), 'Inserted', ...HEADERS.slice(10)];
+    fake.sheet.push(leadRow({ status: STATUS.booked, uid: 'u1' }));
+    const { syncCalendarEvents } = await import('../lib/calendar-sync.js');
+    await expect(syncCalendarEvents([calEvent({ uid: 'u1', response: 'declined' })])).rejects.toMatchObject({ name: 'SheetLayoutError' });
+    expect(fake.sheetCalls.filter((c) => c.method === 'POST')).toHaveLength(0);
+  });
+});

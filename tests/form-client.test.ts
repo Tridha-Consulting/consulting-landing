@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { describe, expect, it, vi } from 'vitest';
+import { classifyChannel } from '../lib/channel.js';
 import { leadSchema } from '../lib/schema.js';
 
 /**
@@ -169,6 +170,35 @@ describe('js/form.js in jsdom', () => {
   it('strips control characters from attribution values', async () => {
     const { body } = await submitValid('?utm_source=%01%01abc');
     expect(body.utmSource).toBe('abc');
+  });
+
+  it('captures every click id and sends it under its schema key, X included', async () => {
+    const { body } = await submitValid('?gclid=G1&fbclid=F1&li_fat_id=L1&twclid=T1&utm_source=x&utm_medium=paid_social');
+    expect(body).toMatchObject({ gclid: 'G1', fbclid: 'F1', liFatId: 'L1', twclid: 'T1', utmSource: 'x', utmMedium: 'paid_social' });
+    expect(leadSchema.parse(body)).toMatchObject({ twclid: 'T1' });
+  });
+
+  it('captures the Google Ads iOS click ids, gbraid and wbraid, and the server accepts and classifies them', async () => {
+    const { body } = await submitValid('?gbraid=GB1&wbraid=WB1');
+    expect(body).toMatchObject({ gbraid: 'GB1', wbraid: 'WB1' });
+    const parsed = leadSchema.parse(body);
+    expect(parsed).toMatchObject({ gbraid: 'GB1', wbraid: 'WB1' });
+    expect(classifyChannel(parsed)).toBe('Google Ads');
+  });
+
+  it('a gbraid or wbraid link replaces the attribution stored earlier in the tab', async () => {
+    await loadPage('?utm_source=newsletter');
+    const g = await loadPage('?gbraid=GB9');
+    expect(JSON.parse(g.window.sessionStorage.getItem('tridha_attribution')!)).toMatchObject({ gbraid: 'GB9' });
+    const w = await loadPage('?wbraid=WB9');
+    expect(JSON.parse(w.window.sessionStorage.getItem('tridha_attribution')!)).toMatchObject({ wbraid: 'WB9' });
+  });
+
+  it('a twclid link replaces the attribution stored earlier in the tab, like any other click id', async () => {
+    const p = await loadPage('?utm_source=newsletter');
+    expect(JSON.parse(p.window.sessionStorage.getItem('tridha_attribution')!)).toMatchObject({ utm_source: 'newsletter' });
+    const q = await loadPage('?twclid=T9');
+    expect(JSON.parse(q.window.sessionStorage.getItem('tridha_attribution')!)).toMatchObject({ twclid: 'T9' });
   });
 
   it('hands the company to the calendar so the Cal event name can show it', async () => {

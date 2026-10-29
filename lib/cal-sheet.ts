@@ -12,6 +12,20 @@ export interface SyncOutcome {
   warn?: string;
   /** Custom booking-form keys with a value but no column; see Plan.unmapped. */
   unmapped?: string[];
+  /**
+   * What the event changed on the row, for the Events tab. Absent when nothing was written (stale) or
+   * the row already held exactly these values (the same event delivered twice).
+   */
+  change?: BookingChange;
+}
+
+export interface BookingChange {
+  leadId: string;
+  /** Status before the event; '' for a row created by the event. */
+  statusFrom: string;
+  statusTo: string;
+  callTime: string;
+  uid: string;
 }
 
 /**
@@ -52,7 +66,15 @@ export function syncBooking(
         signal,
       );
       const m = /!\$?[A-Z]+(\d+)/.exec(res.updates?.updatedRange ?? '');
-      return { matchedBy: 'appended', row: m ? Number(m[1]) : null, warn: plan.warn, unmapped: plan.unmapped };
+      const created = plan.values;
+      const change = {
+        leadId: created[columnIndex('Lead ID')] ?? '',
+        statusFrom: '',
+        statusTo: created[columnIndex('Status')] ?? '',
+        callTime: created[columnIndex('Call Time (IST)')] ?? '',
+        uid: created[columnIndex('Booking UID')] ?? '',
+      };
+      return { matchedBy: 'appended', row: m ? Number(m[1]) : null, warn: plan.warn, unmapped: plan.unmapped, change };
     }
 
     // One batchUpdate touches only the booking cells, so a setter's edits to the rest of
@@ -62,6 +84,8 @@ export function syncBooking(
       values: [[value]],
     });
     const { cells } = plan;
+    const before = read.values?.[plan.row - 1] ?? [];
+    const was = (header: string) => (before[columnIndex(header)] ?? '').trim();
     await sheetsRequest(
       {
         path: '/values:batchUpdate',
@@ -84,6 +108,10 @@ export function syncBooking(
       },
       signal,
     );
-    return { matchedBy: plan.matchedBy, row: plan.row, warn: plan.warn, unmapped: plan.unmapped };
+    const unchanged = was('Status') === cells.status && was('Call Time (IST)') === cells.callTime && was('Booking UID') === cells.uid;
+    const change = unchanged
+      ? undefined
+      : { leadId: was('Lead ID'), statusFrom: was('Status'), statusTo: cells.status, callTime: cells.callTime, uid: cells.uid };
+    return { matchedBy: plan.matchedBy, row: plan.row, warn: plan.warn, unmapped: plan.unmapped, change };
   });
 }

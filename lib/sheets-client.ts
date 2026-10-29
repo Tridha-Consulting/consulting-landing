@@ -20,6 +20,11 @@ export function tabRef(): string {
   return `'${env.sheetTab.replace(/'/g, "''")}'`;
 }
 
+/** A1 tab reference for the Events tab, quoted like tabRef(). */
+export function eventsTabRef(): string {
+  return `'${env.eventsTab.replace(/'/g, "''")}'`;
+}
+
 export interface SheetsRequest {
   /** Path under `/v4/spreadsheets/{sheetId}`, already URL-encoded, e.g. `/values/Leads!A1:append`. */
   path: string;
@@ -39,11 +44,28 @@ export async function sheetsRequest<T = unknown>(req: SheetsRequest, signal: Abo
   return res.data;
 }
 
+/** True when `err` is an HTTP 4xx answer from Google: the request got through, so the token and the client work. */
+function isHttp4xx(err: unknown): boolean {
+  const e = err as { status?: unknown; response?: { status?: unknown } } | null;
+  const status = e?.response?.status ?? e?.status;
+  return typeof status === 'number' && status >= 400 && status < 500;
+}
+
+export interface DeadlineOptions {
+  /** Keep the cached client when the failure is an HTTP 4xx; timeouts, network errors and 5xx still discard it. */
+  keepClientOnHttp4xx?: boolean;
+}
+
 /**
  * Runs `run` under one deadline and discards the cached client when it fails, so a hung token
  * refresh cannot fail every later call on this instance. `what` prefixes the timeout message.
  */
-export async function withDeadline<T>(what: string, deadlineMs: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+export async function withDeadline<T>(
+  what: string,
+  deadlineMs: number,
+  run: (signal: AbortSignal) => Promise<T>,
+  { keepClientOnHttp4xx = false }: DeadlineOptions = {},
+): Promise<T> {
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -58,7 +80,7 @@ export async function withDeadline<T>(what: string, deadlineMs: number, run: (si
   } catch (err) {
     // A hung token refresh stays cached on the JWT and would fail every later request on this
     // instance, so a failure discards the client and the next call starts clean.
-    client = undefined;
+    if (!(keepClientOnHttp4xx && isHttp4xx(err))) client = undefined;
     throw err;
   } finally {
     clearTimeout(timer);

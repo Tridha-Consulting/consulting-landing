@@ -1,5 +1,6 @@
 import { LAST_COLUMN_LETTER, STATUS, assertSheetLayout, columnIndex, columnLetter, formatIST } from './columns.js';
 import { CALENDAR_DEADLINE_MS, calendarDeadline, listEvents, type CalendarEvent, type ListQuery } from './calendar-client.js';
+import { EVENT_LOG_DEADLINE_MS, logEvents, type LeadEvent } from './event-log.js';
 import { WRITE_DEADLINE_MS, sheetsRequest, tabRef, withDeadline } from './sheets-client.js';
 
 // Google Calendar invitee responses -> the lead's Status. Cal.com creates a calendar event for each
@@ -10,6 +11,7 @@ const COL = {
   status: columnIndex('Status'),
   email: columnIndex('Email'),
   uid: columnIndex('Booking UID'),
+  leadId: columnIndex('Lead ID'),
   callTime: columnIndex('Call Time (IST)'),
 };
 
@@ -149,6 +151,7 @@ export async function syncCalendarEvents(
   { deadlineMs = WRITE_DEADLINE_MS }: { deadlineMs?: number } = {},
 ): Promise<{ changes: StatusChange[] }> {
   if (!events.some((e) => bookingUidFromICalUid(e.iCalUID))) return { changes: [] };
+  const eventRows: LeadEvent[] = [];
   const plan = await withDeadline('calendar sheet sync', deadlineMs, async (signal) => {
     const read = await sheetsRequest<{ values?: string[][] }>(
       {
@@ -175,6 +178,19 @@ export async function syncCalendarEvents(
         signal,
       );
     }
+    // Taken from the rows as read, so the audit row needs no second request.
+    for (const c of p.changes) {
+      const row = read.values?.[c.row - 1] ?? [];
+      eventRows.push({
+        event: c.to === STATUS.declined ? 'Declined in Google Calendar' : 'Re-accepted in Google Calendar',
+        source: 'google-calendar',
+        leadId: cell(row, COL.leadId),
+        statusFrom: c.from,
+        statusTo: c.to,
+        callTime: cell(row, COL.callTime),
+        bookingUid: c.uid,
+      });
+    }
     return p;
   });
 
@@ -192,6 +208,9 @@ export async function syncCalendarEvents(
     );
   }
   for (const { uid, from, to } of plan.changes) console.log(JSON.stringify({ event: 'CALENDAR_STATUS_CHANGED', uid, from, to }));
+  // Best-effort audit rows after the Status cells are written; logEvents never throws, and the deadline
+  // caps the time a stuck Events write can add to the sync.
+  await logEvents(eventRows, { deadlineMs: EVENT_LOG_DEADLINE_MS });
   return { changes: plan.changes };
 }
 

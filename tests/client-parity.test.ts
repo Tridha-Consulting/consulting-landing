@@ -55,6 +55,23 @@ describe('js/form.js phone rule is a subset of the server rule, not a mirror', (
   });
 });
 
+describe('js/form.js attribution mirrors lib/schema.ts', () => {
+  it('captures a fixed set of query parameters, twclid, gbraid and wbraid among them', () => {
+    const m = formJs.match(/var ATTR_PARAMS = \[([^\]]+)\]/);
+    expect(m, 'ATTR_PARAMS not found in js/form.js').not.toBeNull();
+    const params = [...m![1]!.matchAll(/'([^']+)'/g)].map((x) => x[1]);
+    expect(params).toEqual(['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid', 'gclid', 'li_fat_id', 'twclid', 'gbraid', 'wbraid']);
+  });
+
+  it('sends only keys the schema knows, and every attribution key the schema has', () => {
+    const body = formJs.match(/function attributionPayload\(\) \{[\s\S]*?return \{([\s\S]*?)\};/);
+    expect(body, 'attributionPayload not found in js/form.js').not.toBeNull();
+    const sent = [...body![1]!.matchAll(/(\w+): a\./g)].map((x) => x[1]!).sort();
+    const attribution = Object.keys(leadSchema.shape).filter((k) => /^(utm|fbclid|gclid|gbraid|wbraid|liFatId|twclid|referrer|landingUrl)/.test(k)).sort();
+    expect(sent).toEqual(attribution);
+  });
+});
+
 describe('js/form.js mirrors lib/schema.ts', () => {
   it('uses the same email regex as the server', () => {
     expect(clientEmailPattern().source).toBe(z.regexes.email.source);

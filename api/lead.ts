@@ -1,15 +1,17 @@
 import { randomUUID } from 'node:crypto';
+import { classifyChannel } from '../lib/channel.js';
+import { EVENT_LOG_DEADLINE_MS, logEvents } from '../lib/event-log.js';
 import { leadSchema } from '../lib/schema.js';
-import type { LeadRow } from '../lib/columns.js';
+import { STATUS, type LeadRow } from '../lib/columns.js';
 import type { LeadSink } from '../lib/sinks/index.js';
 
 // Web-standard handlers (named method exports). Vercel's Node helper layer, which pre-drains
 // the request stream into req.body, is not in the path, so the body is read here exactly once.
 
-// Largest valid body: 12 answers (~1 KB), ten attribution fields of 500 characters, a Turnstile token
-// (up to 2 KB), and up to 3 bytes per UTF-16 unit for non-Latin text. That worst case is about 19.6 KB
-// (about 8.5 KB when ASCII), so a body past 24 KiB is not a real lead.
-const MAX_BODY_BYTES = 24 * 1024;
+// Largest valid body: 12 answers (~1 KB), thirteen attribution fields of 500 characters, a Turnstile token
+// (up to 2 KB), and up to 3 bytes per UTF-16 unit for non-Latin text. That worst case is about 24.1 KB
+// (about 10 KB when ASCII), so the 32 KiB cap leaves room for a few more fields. tests/handler.test.ts builds it.
+const MAX_BODY_BYTES = 32 * 1024;
 const TURNSTILE_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 
 class BodyError extends Error {
@@ -155,6 +157,11 @@ export async function POST(request: Request): Promise<Response> {
   if (written === 0) return json(502, { ok: false, error: 'write_failed' });
 
   console.log(JSON.stringify({ event: 'LEAD_WRITTEN', leadId: lead.leadId }));
+  // Best-effort audit row after the lead is stored; logEvents never throws, so the response is unchanged,
+  // and the deadline caps the time a stuck Events write can add to it.
+  await logEvents([{ event: 'Lead submitted', source: 'form', leadId: lead.leadId, statusTo: STATUS.new, detail: classifyChannel(lead) }], {
+    deadlineMs: EVENT_LOG_DEADLINE_MS,
+  });
   return json(200, { ok: true, leadId: lead.leadId });
 }
 

@@ -9,6 +9,7 @@ Static landing page plus one Vercel serverless function that appends leads to a 
 - `js/booking.js`, `book.html`: the Cal.com inline booking embed, used by the modal and by `/book` (see Cal.com booking).
 - `api/cal-webhook.ts`: Cal.com booking webhook that updates the lead's row (see "Cal.com webhook"). `lib/cal-booking.ts` (parse + row matching, pure), `lib/cal-sheet.ts` + `lib/sheets-client.ts` (Sheets I/O shared with the lead sink).
 - `api/calendar-notify.ts`, `api/calendar-cron.ts`: flag a booker who declines the Google invite (see "Google Calendar declines"). `lib/calendar-sync.ts` (decision + Status write), `lib/calendar-client.ts` (read-only Calendar API), `lib/calendar-env.ts`.
+- `lib/channel.ts` (`classifyChannel`, pure: which marketing channel a lead came from), `lib/event-log.ts` (best-effort audit rows on the Events tab).
 - `api/lead.ts`: the endpoint. `lib/schema.ts` (zod, single source of truth, including the answer option lists), `lib/columns.ts` (sheet layout), `lib/sinks/` (where leads go), `lib/env.ts` (fails loudly on missing env).
 
 ## Local development
@@ -30,6 +31,7 @@ npm run dev         # vercel dev: serves the page and /api/lead
 | `GOOGLE_PRIVATE_KEY` | yes | `private_key` from the JSON key. Literal `\n` is fine |
 | `SHEET_ID` | yes | the long id in the sheet URL |
 | `SHEET_TAB` | no | defaults to `Leads` |
+| `EVENTS_TAB` | no | defaults to `Events`; the audit-log tab, see "Events tab" |
 | `TURNSTILE_SECRET_KEY` | no | set together with `TURNSTILE_SITE_KEY` in `js/config.js` |
 | `CAL_WEBHOOK_SECRET` | for `/api/cal-webhook` | the secret typed into the Cal.com webhook; without it the endpoint returns 500 |
 | `CALENDAR_ID`, `CALENDAR_CHANNEL_TOKEN`, `CRON_SECRET` | for the calendar sync | see "Google Calendar declines" |
@@ -41,9 +43,10 @@ npm run dev         # vercel dev: serves the page and /api/lead
 3. IAM & Admin, Service Accounts, Create service account (e.g. `lead-writer`). No roles needed.
 4. Open the service account, Keys, Add key, Create new key, JSON. A file downloads. Keep it private and do not commit it.
 5. Create the Google Sheet. Rename the first tab to `Leads` (or set `SHEET_TAB`). Click Share and add the service account email (`client_email` in the JSON) as Editor.
-6. Paste the header row into cell A1. Print it with `npm run sheet-headers` and paste the tab-separated line, which fills A1 to AF1 across cells (32 columns). The nine answer columns from `Designation` to `Decision Maker` are filled from the site form when the lead is saved. The booking columns (`Call Time (IST)`, `Booked At (IST)`, `Booking Details`, `Booking UID`, `Last Event At`) are filled by the Cal.com webhook and stay blank on a fresh lead. The order must match `lib/columns.ts`; that file generates both. While the sheet holds only a header row it can be replaced with the new one outright. Once it holds data rows, columns are only ever appended at the end: reordering would misalign the existing rows. The Cal.com webhook refuses to write unless this header row matches exactly (see "Questions and sheet columns").
+6. Paste the header row into cell A1. Print it with `npm run sheet-headers`, which prints two labelled tab-separated lines, one for the Leads tab and one for the Events tab (step 9). Paste the Leads line, which fills A1 to AN1 across cells (40 columns). `Channel`, `twclid`, `gbraid` and `wbraid` follow `Last Event At` (see "Channel"). To move an existing sheet to this layout, follow "Rollout order". The last four, `Call Outcome`, `Qualified`, `Setter Notes` and `Deal Value (₹)`, are the team's (see "Team columns"). The nine answer columns from `Designation` to `Decision Maker` are filled from the site form when the lead is saved. The booking columns (`Call Time (IST)`, `Booked At (IST)`, `Booking Details`, `Booking UID`, `Last Event At`) are filled by the Cal.com webhook and stay blank on a fresh lead. The order must match `lib/columns.ts`; that file generates both. While the sheet holds only a header row it can be replaced with the new one outright. Once it holds data rows, columns are only ever appended at the end: reordering would misalign the existing rows. The Cal.com webhook and the calendar sync refuse to write unless the first 40 header cells match exactly; cells after AN are not checked (see "Trailing columns").
 7. In Vercel, Project, Settings, Environment Variables, add `GOOGLE_SERVICE_ACCOUNT_EMAIL`, `GOOGLE_PRIVATE_KEY`, `SHEET_ID` for Production (and Preview if wanted). Redeploy.
 8. Submit a test lead on the live page and confirm a row appears.
+9. Optional, for the audit log (see "Events tab"): add a second tab named `Events` (or set `EVENTS_TAB`), and paste the Events line from `npm run sheet-headers` into its A1. The tab sits in the same spreadsheet and needs no extra sharing. Until it exists the log writes fail harmlessly (`EVENT_LOG_WRITE_FAILED`) and everything else works.
 
 If a write fails, the function logs one JSON line `{"event":"LEAD_WRITE_FAILED", ...}` containing the full lead. Search Vercel logs for `LEAD_WRITE_FAILED` to recover it. `LEAD_WRITTEN` marks successes.
 
@@ -157,9 +160,59 @@ This matters mostly for a booking that arrives with no lead row (for example a s
 - `Booked At (IST)` is when the lead first booked: the webhook's `createdAt` on `BOOKING_CREATED` (the server clock if that is missing or unusable), shown in IST. It is written only while the cell is empty, so a replayed event, a reschedule, a cancel or a re-book after a cancel never moves it. It stays blank if that lead's `BOOKING_CREATED` was never applied (lost, or ignored as stale); fill it by hand. `Call Time (IST)` is still when the call is.
 - Each answer cell is capped at 45,000 characters like `Booking Details`.
 - Cal may write an identifier with hyphens where the table has underscores (`tech-team` for `tech_team`). The webhook treats `-` and `_` as the same, for the answer column, the Booking Details exclusion and the unmapped check. If both spellings carry a value, the underscore one is used.
-- The webhook checks the live header row before every write. It must equal the output of `npm run sheet-headers` exactly (32 cells, A1:AF1, spaces around a cell ignored). If the tab is empty or the header differs (an old 22-column header, a renamed or missing column), nothing is written: the function logs `CAL_WEBHOOK_MISCONFIGURED` with the first differing column (headers only, never row data), the trigger and the full payload, and returns 500. Fix the header row; the payload in the log is the way to recover the booking.
+- The webhook checks the live header row before every write. Its first 40 cells (A1:AN1, the Leads line of `npm run sheet-headers`) must match exactly, spaces around a cell ignored; cells after AN are not checked (see "Trailing columns"). If the tab is empty or the header differs within those 40 (an old 22-column or 32-column header, a renamed, missing or reordered column, one inserted in the middle), nothing is written: the function logs `CAL_WEBHOOK_MISCONFIGURED` with the first differing column (headers only, never row data), the trigger and the full payload, and returns 500. Fix the header row; the payload in the log is the way to recover the booking.
 
-`/api/lead` accepts request bodies up to 24 KiB (`MAX_BODY_BYTES` in `api/lead.ts`): the largest valid lead is about 8.5 KB in ASCII and about 19.6 KB in worst-case non-Latin text.
+### Channel, team columns and the Events tab
+
+**Channel.** `Channel` is derived when the row is written, from the attribution columns, by `classifyChannel` in `lib/channel.ts` (pure, covered by `tests/channel.test.ts`). The first rule that matches wins:
+
+| # | Rule | Channel |
+|---|---|---|
+| 1 | `utm_medium` matches GA4's paid rule `^(.*cp.*|ppc|retargeting|paid.*)$` (so `cpc`, `cpm`, `cpv`, `ppc`, `retargeting`, `paid`, `paid_social`, `paid_media`) or is `sponsored`, `display`, `ad`, `ads`, `pmax`, `paid_social`, `paidsocial` or `social_paid`; or `gclid`, `gbraid`, `wbraid`, `twclid` or `li_fat_id` is present: paid, platform by `gclid`, `gbraid`, `wbraid` or `utm_source` Google (see aliases below) | Google Ads |
+| | then `twclid` or `utm_source` X | X Ads |
+| | then `li_fat_id` or `utm_source` LinkedIn | LinkedIn Ads |
+| | then `utm_source` Meta, or an `fbclid` beside the paid medium | Meta Ads |
+| | none of those | Paid (other) |
+| 2 | `utm_medium` is `email`, or `utm_source` is exactly `email`, `newsletter`, `mailchimp` or `zoho_campaigns` (a source that merely contains "mail", such as `dailymail` or `hotmail`, is not Email) | Email |
+| 3 | `utm_medium` is `social` or `organic_social` | Organic Social |
+| 4 | an `fbclid` with none of the above (Meta adds it to organic link clicks, so it is not paid) | Organic Social |
+| 5 | `utm_source` is a social network (Meta, X, LinkedIn, `youtube`, `whatsapp`, `reddit`) and the medium is not paid | Organic Social |
+| | `utm_source` is a search engine (`google`, `bing`, `duckduckgo`, `yahoo`, `yandex`, `ecosia`) and `utm_medium` is `organic` | Organic Search |
+| 6 | referrer host (leading `www.` dropped): `mail.google.com`, `outlook.live.com`, `mail.yahoo.com`; `android-app://com.google.android.gm` | Email |
+| | `googleadservices.com`, `googlesyndication.com`, `doubleclick.net` (subdomains included) | Google Ads |
+| | search hosts only: `google.<tld>` (`google.com`, `google.co.in`; `mail.`, `docs.`, `news.` and other subdomains do not count), `bing.com`, `duckduckgo.com`, `search.yahoo.com`, `yandex.<tld>`, `ecosia.org`; `android-app://com.google.android.googlequicksearchbox` | Organic Search |
+| | t.co, x.com, twitter.com, facebook, instagram, linkedin, lnkd.in, youtube, whatsapp, wa.me, reddit (subdomains such as `l.facebook.com` included); the Android apps `com.linkedin.android`, `com.twitter.android`, `com.instagram.android`, `com.facebook.katana`, `com.whatsapp` | Organic Social |
+| | the site's own host, or the host of the landing URL: ignored | Direct |
+| | any other http(s) host, including `docs.google.com`; any other `android-app://` package | Referral |
+| 7 | nothing matched: any `utm_source` at all (tagged traffic is never Direct) | Referral |
+| | nothing matched, no `utm_source`, and the referrer is empty or not an http(s) or android-app URL | Direct |
+
+`utm_medium` and `utm_source` are matched after lower-casing and folding runs of spaces, hyphens and underscores into one underscore, so `Paid Social`, `paid-social` and `paid_social` are one value. `utm_source` aliases: `google`, `google_ads`, `googleads`, `adwords` are Google; `x`, `twitter` are X; `facebook`, `fb`, `instagram`, `ig`, `meta` are Meta; `linkedin`, `lnkd` are LinkedIn. When several paid signals disagree the order is Google, X, LinkedIn, Meta. `utm_source=google` without a paid medium or click id is not paid: with `utm_medium=organic` it is Organic Search, otherwise it falls through to the referrer rules. The channel is computed from exactly what the `UTM`, click-id, `Referrer` and `Landing URL` columns hold (`js/form.js` keeps the attribution in `sessionStorage` for the tab, and a link carrying a campaign or click id replaces what was stored). `twclid` is X's click id (the X Ads equivalent of `gclid`), and `gbraid` and `wbraid` are Google Ads' click ids for iOS traffic that cannot carry a `gclid` (app-to-web and web-to-app); `js/form.js` captures all three and `/api/lead` stores them, in the `twclid`, `gbraid` and `wbraid` columns right after `Channel`. Rows written before this layout was deployed have a blank Channel: it is computed only when a row is written and there is no backfill. A row created by a Cal booking with no lead has no attribution, so its Channel is `Direct`.
+
+**Team columns.** `Call Outcome`, `Qualified`, `Setter Notes` and `Deal Value (₹)` are for the team to fill in by hand. The code writes them blank when it appends a row and never addresses them afterwards: not the Cal.com webhook, not the calendar sync (`tests/cal-webhook.test.ts` and `tests/calendar-sync.test.ts` pin this with filled cells). They are the last four of the 40 and `MANUAL_HEADERS` in `lib/columns.ts` lists them.
+
+**Trailing columns.** A team member may add columns to the right of `Deal Value (₹)` (AO onwards). The header guard checks only the first 40 cells, and every read is `A:AN`, so extra columns are neither read nor written, and a booking or decline never shifts them. Anything inside A:AN that differs (a missing, renamed or reordered column, or a column inserted in the middle) still refuses the write. The append-only rule is unchanged: once the sheet holds data rows, new columns of ours go after `Deal Value (₹)` and never in front of it, and a column inserted in the middle by hand would misalign every row the code writes.
+
+**Rollout order (moving a live sheet to this layout).** The live Leads tab has the old 32-column header (A1:AF1) and holds data rows. Do these in this order, then deploy:
+
+1. Confirm `AG1:AN1` on the live Leads tab are empty. The new header fills A1:AN1, so anything the team keeps there would be overwritten.
+2. Paste the full new Leads header line (`npm run sheet-headers`, first line) into `Leads!A1`. Existing rows are untouched: their new cells are simply blank.
+3. Create the Events tab (`Events`, or the name in `EVENTS_TAB`) and paste the Events header line into its A1.
+4. Deploy.
+
+Why this order: the new code's header guard refuses any header that is not the 40 columns, so deploying first makes every Cal.com booking and calendar sync fail with 500 (`CAL_WEBHOOK_MISCONFIGURED`) until the header is pasted. The old code reads only `A:AF`, so it never sees the extra header cells and its own header check still passes: step 2 can be done while the old code is still live. The Events tab goes in before the deploy because until it exists every audit row fails (`EVENT_LOG_WRITE_FAILED`) and is not retried. Rows written before the deploy have a blank `Channel` (and blank `twclid`, `gbraid`, `wbraid`); there is no backfill. A row a Cal booking creates with no lead behind it gets `Direct`, because it carries no attribution.
+
+**Events tab.** An audit log with one row per event, appended (RAW, INSERT_ROWS) to the tab named by `EVENTS_TAB` (default `Events`). Header row: `At (IST)`, `Lead ID`, `Event`, `Status From`, `Status To`, `Call Time (IST)`, `Booking UID`, `Source`, `Detail` (`npm run sheet-headers` prints it).
+
+| Event | Written by | Source | Filled columns |
+|---|---|---|---|
+| `Lead submitted` | `/api/lead`, after the lead is stored | `form` | Status To `New`, Detail = the Channel |
+| `Booked`, `Rescheduled`, `Cancelled` | `/api/cal-webhook`, when it changes the row | `cal` | Status From (blank for a row the booking created), Status To, Call Time, Booking UID |
+| `Declined in Google Calendar`, `Re-accepted in Google Calendar` | the calendar sync, when it changes a Status | `google-calendar` | Status From, Status To, Call Time, Booking UID |
+
+An event the webhook ignores (stale event or cancellation, an unhandled trigger) writes no row, and neither does the same event delivered twice (the row already held those values). Logging is best-effort: it runs after the main write, and a failure never changes what the lead, webhook or sync returns. It is logged as `EVENT_LOG_WRITE_FAILED` (`eventName`, `leadId` when known, `error`; no names or emails), one line per event. The Events write is awaited but capped at 2 seconds (`EVENT_LOG_DEADLINE_MS` in `lib/event-log.ts`), so a stuck log write holds `/api/lead`, the webhook or the calendar sync back by at most 2 seconds instead of the 8 second deadline of the main Sheets calls. A failure that is an HTTP 4xx from Sheets (a missing Events tab is a 400) leaves the shared Sheets client alone; a timeout or network error discards it, like any other Sheets failure. A failed audit row is not retried: the Leads tab holds the current state, and the log line is the record of what was missed.
+
+`/api/lead` accepts request bodies up to 32 KiB (`MAX_BODY_BYTES` in `api/lead.ts`): the largest valid lead is about 10 KB in ASCII and about 24.1 KB in worst-case non-Latin text.
 
 ## DNS cutover
 

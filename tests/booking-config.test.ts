@@ -8,8 +8,8 @@ function scriptOrder(html: string): string[] {
 }
 
 describe('Cal.com booking wiring', () => {
-  it('ships with booking switched off', () => {
-    expect(read('js/config.js')).toMatch(/CAL_LINK: '',/);
+  it('points at the live event as a bare <user>/<event> path', () => {
+    expect(read('js/config.js')).toMatch(/CAL_LINK: 'tridha-consulting\/exploration-call',/);
   });
 
   it.each(['index.html', 'book.html'])('%s loads config.js before booking.js, and booking.js before form.js', (page) => {

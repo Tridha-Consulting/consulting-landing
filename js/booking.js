@@ -8,7 +8,7 @@
 
   var CFG = window.TRIDHA_CONFIG || {};
   var DEFAULT_ORIGIN = 'https://app.cal.com';
-  var READY_MS = 8000;
+  var READY_MS = 15000; // Cal took ~7s to start its iframe on a slow connection (2026-10-29); 8s showed the fallback before the calendar arrived
   var seq = 0;
   var scriptState = '';       // '', 'loading', 'loaded', 'failed'
   var scriptWaiters = [];

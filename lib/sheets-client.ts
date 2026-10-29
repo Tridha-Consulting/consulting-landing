@@ -15,6 +15,11 @@ function getClient(): JWT {
   return client;
 }
 
+/** A1 tab reference, quoted so tab names with spaces or punctuation resolve. */
+export function tabRef(): string {
+  return `'${env.sheetTab.replace(/'/g, "''")}'`;
+}
+
 export interface SheetsRequest {
   /** Path under `/v4/spreadsheets/{sheetId}`, already URL-encoded, e.g. `/values/Leads!A1:append`. */
   path: string;

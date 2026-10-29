@@ -23,12 +23,13 @@ export function formatIST(d: Date): string {
   return new Date(d.getTime() + IST_OFFSET_MS).toISOString().slice(0, 19).replace('T', ' ');
 }
 
-/** Values of the Status column. `New` is written by /api/lead, the rest by /api/cal-webhook. */
+/** Values of the Status column. `New` is written by /api/lead, `Declined` by the calendar sync (lib/calendar-sync.ts), the rest by /api/cal-webhook. */
 export const STATUS = {
   new: 'New',
   booked: 'Booked',
   rescheduled: 'Rescheduled',
   cancelled: 'Cancelled',
+  declined: 'Declined',
 } as const;
 
 /**

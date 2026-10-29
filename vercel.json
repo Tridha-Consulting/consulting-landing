@@ -1,5 +1,6 @@
 {
   "cleanUrls": true,
+  "crons": [{ "path": "/api/calendar-cron", "schedule": "30 0 * * *" }],
   "headers": [
     {
       "source": "/(.*)",

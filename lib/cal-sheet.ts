@@ -1,7 +1,6 @@
 import { LAST_COLUMN_LETTER, assertSheetLayout, columnIndex, columnLetter } from './columns.js';
 import { planBooking, type Booking, type BookingTrigger, type MatchedBy } from './cal-booking.js';
-import { env } from './env.js';
-import { WRITE_DEADLINE_MS, sheetsRequest, withDeadline } from './sheets-client.js';
+import { WRITE_DEADLINE_MS, sheetsRequest, tabRef, withDeadline } from './sheets-client.js';
 
 export interface SyncOutcome {
   matchedBy: MatchedBy;
@@ -13,11 +12,6 @@ export interface SyncOutcome {
   warn?: string;
   /** Custom booking-form keys with a value but no column; see Plan.unmapped. */
   unmapped?: string[];
-}
-
-/** A1 tab reference, quoted so tab names with spaces or punctuation resolve. */
-function tabRef(): string {
-  return `'${env.sheetTab.replace(/'/g, "''")}'`;
 }
 
 /**

@@ -88,7 +88,7 @@ With `CAL_LINK` set, a successful submit turns the modal into the calendar ("Pic
 https://consulting.tridha.net/book?name=Asha%20Rao&email=asha%40example.com&phone=%2B919876543210
 ```
 
-`phone` is sent to Cal as `attendeePhoneNumber`, the key of Cal's default phone field. If the event type uses a differently named phone field, change `prefillParams` in `js/booking.js`.
+`phone` is sent to Cal as `attendeePhoneNumber`, the key of Cal's default phone field. The form validates the number with `libphonenumber-js/max` on the server (`lib/schema.ts`), so an invalid number is flagged on our form rather than blocking Confirm in Cal; the browser only applies a cheap India rule (10 digits starting 6-9) and otherwise relies on the server's field error. If the event type uses a differently named phone field, change `prefillParams` in `js/booking.js`.
 
 ### Questions and sheet columns
 
@@ -98,7 +98,7 @@ All twelve questions are asked on the site form (`js/form.js`), on one page, eve
 |---|---|---|
 | Full Name (`fullName`) | Full Name | Text |
 | Designation (`designation`) | Designation | Text, 1 to 120 characters |
-| Phone (`phone`) | Phone | Country code + number |
+| Phone (`phone`) | Phone | Country code + number; the server rejects numbers libphonenumber-js (max metadata) deems invalid, the same check Cal.com's booking step applies |
 | Email (`email`) | Email | Email |
 | Company Name (`company`) | Company | Text, 1 to 120 characters |
 | Company Website (`website`) | Website | Text, 1 to 200 characters, not format-checked |

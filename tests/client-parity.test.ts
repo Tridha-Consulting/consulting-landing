@@ -44,6 +44,17 @@ function clientFiles(dir: string): string[] {
   return out;
 }
 
+describe('js/form.js phone rule is a subset of the server rule, not a mirror', () => {
+  // The client only knows the India shape (10 digits, first 6-9); libphonenumber-js is not bundled.
+  // The server is the backstop, so a client-accepted number may still get a server 400 on the field.
+  it('every Indian number the client rule would accept has the shape the server expects', () => {
+    expect(formJs).toContain(String.raw`dial === '91' && !/^[6-9]\d{9}$/.test(national)`);
+    for (const n of ['9876543210', '7045152625', '6000000000', '9999999999', '8123456789']) {
+      expect(leadSchema.safeParse({ ...validBody, phone: `+91${n}` }).success, n).toBe(true);
+    }
+  });
+});
+
 describe('js/form.js mirrors lib/schema.ts', () => {
   it('uses the same email regex as the server', () => {
     expect(clientEmailPattern().source).toBe(z.regexes.email.source);

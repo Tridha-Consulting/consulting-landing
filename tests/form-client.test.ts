@@ -23,7 +23,7 @@ interface Page {
   calls: Call[];
 }
 
-async function loadPage(search = '', calLink = ''): Promise<Page> {
+async function loadPage(search = '', calLink = '', response?: { status: number; body: unknown }): Promise<Page> {
   const dom = new JSDOM(read('index.html'), {
     url: `http://localhost/${search}`,
     runScripts: 'outside-only',
@@ -34,6 +34,9 @@ async function loadPage(search = '', calLink = ''): Promise<Page> {
   const w = window as unknown as Record<string, unknown>;
   w.fetch = vi.fn((url: string, init: Call['init']) => {
     calls.push({ url, init });
+    if (response) {
+      return Promise.resolve({ ok: response.status < 400, status: response.status, json: () => Promise.resolve(response.body) });
+    }
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, leadId: 'x' }) });
   });
   window.Element.prototype.scrollIntoView = () => {};
@@ -190,5 +193,52 @@ describe('js/form.js in jsdom', () => {
     openForm(p);
     expect(warmed).toBe(1);
     expect(p.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['2932838188', 'a landline-style number (starts with 2)'],
+    ['5876543210', 'starts with 5'],
+    ['98765', 'too short'],
+    ['98765432101', 'too long'],
+  ])('rejects the Indian number %s on the client (%s)', async (num) => {
+    const p = await loadPage();
+    const form = openForm(p);
+    fillValid(p, form);
+    setText(p, form, 'phone', num);
+    submit(p, form);
+    expect(errorText(form, 'phone')).toBe('Please enter a valid 10-digit mobile number.');
+    expect(p.calls).toHaveLength(0);
+  });
+
+  it.each(['9876543210', '098765 43210', '7045152625', '6000000000'])('accepts the Indian number %s on the client', async (num) => {
+    const p = await loadPage();
+    const form = openForm(p);
+    fillValid(p, form);
+    setText(p, form, 'phone', num);
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(1));
+    expect(errorText(form, 'phone')).toBe('');
+  });
+
+  it('shows the server phone message on the phone field and keeps the form usable', async () => {
+    const p = await loadPage('', '', {
+      status: 400,
+      body: { ok: false, error: 'validation_failed', fields: { phone: ['Enter a valid phone number'] } },
+    });
+    const form = openForm(p);
+    fillValid(p, form);
+    submit(p, form);
+    await vi.waitFor(() => expect(errorText(form, 'phone')).toBe('Enter a valid phone number'));
+    expect(p.calls).toHaveLength(1);
+    expect(p.document.querySelector('.trd-thanks')).toBeNull();
+    const btn = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    expect(btn.textContent).toBe('Submit');
+    expect(form.querySelector('input[name="phone"]')).toBe(p.document.activeElement);
+    // The visitor fixes it and can resubmit.
+    setText(p, form, 'phone', '9812345678');
+    expect(errorText(form, 'phone')).toBe('');
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(2));
   });
 });

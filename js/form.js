@@ -150,6 +150,8 @@
     } else if (field === 'phone') {
       var national = nationalDigits(dial, v);
       if (!national) return 'Please enter your phone number.';
+      /* India: cheap subset of the server's libphonenumber check (a 10-digit mobile starting 6-9). */
+      if (dial === '91' && !/^[6-9]\d{9}$/.test(national)) return 'Please enter a valid 10-digit mobile number.';
       var total = (dial + national).length;
       if (total < RULES.phone.minDigits || total > RULES.phone.maxDigits || national.length < 4) {
         return 'Please enter a valid phone number.';

@@ -144,6 +144,47 @@ describe('leadSchema qualification answers', () => {
   });
 });
 
+describe('phone validity (libphonenumber-js max metadata)', () => {
+  const phoneOk = (phone: string) => leadSchema.safeParse({ ...validBody, phone }).success;
+
+  it('rejects +912932838188, the number Cal.com refused', () => {
+    const r = leadSchema.safeParse({ ...validBody, phone: '+912932838188' });
+    expect(r.success).toBe(false);
+    expect(r.error?.issues[0]?.message).toBe('Enter a valid phone number');
+    expect(r.error?.issues[0]?.path).toEqual(['phone']);
+  });
+
+  it.each([
+    '+919876543210', // India
+    '+917045152625',
+    '+916000000000',
+    '+919999999999',
+    '+447911123456', // UK mobile
+    '+442071838750', // UK London
+    '+14155552671', // US
+    '+971501234567', // UAE
+    '+6591234567', // Singapore
+    '+390612345678', // Italy keeps the 0 (landline)
+  ])('accepts %s', (n) => {
+    expect(phoneOk(n)).toBe(true);
+  });
+
+  it.each([
+    '+912932838188',
+    '+910000000000',
+    '+1234567890',
+    '+614123456789', // Australian mobile with an extra digit
+    '+9112', // passes the length shape check only on paper; too short anyway
+  ])('rejects %s', (n) => {
+    expect(phoneOk(n)).toBe(false);
+  });
+
+  it('validates after normalisation (trunk zero, separators)', () => {
+    expect(phoneOk('+91 098765-43210')).toBe(true);
+    expect(phoneOk('+44 (0) 7911 123456')).toBe(true);
+  });
+});
+
 describe('normalisePhone trunk zero', () => {
   it.each([
     ['+9109812345678', '+919812345678'],

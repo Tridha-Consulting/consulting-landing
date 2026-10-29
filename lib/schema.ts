@@ -1,3 +1,4 @@
+import { isValidPhoneNumber } from 'libphonenumber-js/max';
 import { z } from 'zod';
 
 const attr = z.string().trim().max(500).optional();
@@ -91,7 +92,10 @@ export const leadSchema = z.object({
   phone: z
     .string()
     .transform(normalisePhone)
-    .refine((v) => /^\+\d{6,15}$/.test(v), 'Enter a phone number with country code (6-15 digits)'),
+    .refine((v) => /^\+\d{6,15}$/.test(v), 'Enter a phone number with country code (6-15 digits)')
+    // "max" metadata, not the default "min": min accepts +912932838188 (a landline-shaped Indian
+    // number) which Cal.com's phone field then rejects, so only max agrees with the booking step.
+    .refine((v) => isValidPhoneNumber(v), 'Enter a valid phone number'),
   designation: answerText('Designation', 120),
   company: answerText('Company name', 120),
   website: answerText('Company website', 200),

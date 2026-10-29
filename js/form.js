@@ -506,6 +506,7 @@
         name: inputs.fullName.value.trim(),
         email: inputs.email.value.trim(),
         phone: normalisePhone(inputs.dial.value, inputs.phone.value),
+        company: inputs.company.value.trim(),
         leadId: leadId ? String(leadId) : ''
       }, {
         /* The calendar did not render: the card reverts to thank-you sizing and wording until/unless it does. */

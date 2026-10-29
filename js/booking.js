@@ -29,12 +29,14 @@
   }
 
   /* Prefill keys are Cal's own: name, email, the default phone field slug attendeePhoneNumber,
-     and metadata[key] (delivered to the booking webhook as payload.metadata.key). */
+     and metadata[key] (delivered to the booking webhook as payload.metadata.key). company fills a hidden
+     Cal booking question with the identifier "company", which the event name can use as {COMPANY}. */
   function prefillParams(p) {
     var out = {};
     if (p.name) out.name = p.name;
     if (p.email) out.email = p.email;
     if (p.phone) out.attendeePhoneNumber = p.phone;
+    if (p.company) out.company = p.company;
     if (p.leadId) out['metadata[leadId]'] = p.leadId;
     return out;
   }
@@ -92,7 +94,7 @@
   }
 
   /* mount(container, prefill, callbacks, options)
-       prefill   { name, email, phone, leadId }
+       prefill   { name, email, phone, company, leadId }
        callbacks { onReady({ focusWasInFallback }), onFallback(reason), onBooked() }  all optional
        options   { fallbackText | fallbackNode() }  text (or a node factory) shown above the "Open the booking page" link when the embed does not render
      Returns true when the embed was started, false when no CAL_LINK is configured (container untouched). */
@@ -179,7 +181,7 @@
     return true;
   }
 
-  /* /book: any element with data-trd-booking is filled from the query string (name, email, phone). */
+  /* /book: any element with data-trd-booking is filled from the query string (name, email, phone, company). */
   function clip(v, n) { return String(v == null ? '' : v).slice(0, n); }
 
   function autoInit() {
@@ -187,7 +189,7 @@
     if (!host) return;
     var q;
     try { q = new URLSearchParams(window.location.search); } catch (e) { q = { get: function () { return ''; } }; }
-    var prefill = { name: clip(q.get('name'), 120), email: clip(q.get('email'), 254), phone: clip(q.get('phone'), 20) };
+    var prefill = { name: clip(q.get('name'), 120), email: clip(q.get('email'), 254), phone: clip(q.get('phone'), 20), company: clip(q.get('company'), 120) };
     var contact = CFG.FALLBACK_CONTACT || '';
     function contactNode() {
       return /@/.test(contact) ? el('a', { href: 'mailto:' + contact, text: contact }) : document.createTextNode(contact);

@@ -23,7 +23,7 @@ interface Page {
   calls: Call[];
 }
 
-async function loadPage(search = ''): Promise<Page> {
+async function loadPage(search = '', calLink = ''): Promise<Page> {
   const dom = new JSDOM(read('index.html'), {
     url: `http://localhost/${search}`,
     runScripts: 'outside-only',
@@ -37,8 +37,8 @@ async function loadPage(search = ''): Promise<Page> {
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, leadId: 'x' }) });
   });
   window.Element.prototype.scrollIntoView = () => {};
-  // Empty CAL_LINK: success shows the thank-you instead of mounting the calendar.
-  window.eval(read('js/config.js').replace(/CAL_LINK:\s*'[^']*'/, "CAL_LINK: ''"));
+  // Empty CAL_LINK (the default here): success shows the thank-you instead of mounting the calendar.
+  window.eval(read('js/config.js').replace(/CAL_LINK:\s*'[^']*'/, `CAL_LINK: '${calLink}'`));
   for (const f of ['js/email-suggest.js', 'js/booking.js', 'js/form.js']) window.eval(read(f));
   if (window.document.readyState === 'loading') {
     await new Promise<void>((r) => window.document.addEventListener('DOMContentLoaded', () => r()));
@@ -166,5 +166,19 @@ describe('js/form.js in jsdom', () => {
   it('strips control characters from attribution values', async () => {
     const { body } = await submitValid('?utm_source=%01%01abc');
     expect(body.utmSource).toBe('abc');
+  });
+
+  it('hands the company to the calendar so the Cal event name can show it', async () => {
+    const p = await loadPage('', 'tridha-consulting/exploration-call');
+    const booking = (p.window as unknown as { trdBooking: { mount: unknown; bookingUrl: (x: object) => string } }).trdBooking;
+    const prefills: Record<string, string>[] = [];
+    booking.mount = (_host: unknown, prefill: Record<string, string>) => { prefills.push(prefill); return true; };
+    const form = openForm(p);
+    fillValid(p, form);
+    submit(p, form);
+    await vi.waitFor(() => expect(prefills).toHaveLength(1));
+    expect(prefills[0]).toMatchObject({ name: 'Asha Rao', company: 'Acme Industries', phone: '+919876543210', leadId: 'x' });
+    const url = new URL(booking.bookingUrl({ company: 'Acme & Co', name: 'Asha' }));
+    expect(url.searchParams.get('company')).toBe('Acme & Co');
   });
 });

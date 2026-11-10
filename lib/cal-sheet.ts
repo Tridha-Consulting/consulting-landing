@@ -96,6 +96,8 @@ export function syncBooking(
             at('Status', cells.status),
             at('Call Time (IST)', cells.callTime),
             at('Booking Details', cells.details),
+            // Always written: a cancel sets the reason and any later booking clears a stale one.
+            at('Cancellation Reason', cells.cancellationReason),
             at('Booking UID', cells.uid),
             // Left alone when the event carried no createdAt, so the stored order marker survives.
             ...(cells.lastEventAt ? [at('Last Event At', cells.lastEventAt)] : []),

@@ -432,8 +432,56 @@ describe('booking cancelled', () => {
     expect(row[COL['Status']!]).toBe('Cancelled');
     expect(row[COL['Call Time (IST)']!]).toBe('2026-11-02 15:00:00');
     expect(row[COL['Company']!]).toBe('Rao & Co');
-    expect(row[COL['Booking Details']!]).toBe('Cancellation reason: Clash with board meeting');
+    expect(row[COL['Cancellation Reason']!]).toBe('Clash with board meeting');
+    expect(row[COL['Booking Details']!]).toBe('');
     expect(row[COL['Booking UID']!]).toBe('bk_1');
+  });
+
+  it('keeps the reason out of Booking Details even when the booking has other details', async () => {
+    sheet.push(leadRow({ Status: 'Booked', 'Booking UID': 'bk_1' }));
+    const h = await loadHandler();
+    await post(
+      h,
+      calRequest(event('BOOKING_CANCELLED', booking({ cancellationReason: '  Clash with board meeting \n', responses: { notes: { label: 'Notes', value: 'Pricing' } } }))),
+    );
+    const row = sheet[1]!;
+    expect(row[COL['Cancellation Reason']!]).toBe('Clash with board meeting');
+    expect(row[COL['Booking Details']!]).toBe('Notes: Pricing');
+    expect(row.join('\n')).not.toContain('Cancellation reason:');
+  });
+
+  it('writes an empty reason when the cancel carries none, replacing an older one', async () => {
+    sheet.push(leadRow({ Status: 'Booked', 'Booking UID': 'bk_1', 'Cancellation Reason': 'old reason' }));
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CANCELLED', booking({ cancellationReason: '   ' }))));
+    expect(sheet[1]![COL['Status']!]).toBe('Cancelled');
+    expect(sheet[1]![COL['Cancellation Reason']!]).toBe('');
+  });
+
+  it.each(['BOOKING_CREATED', 'BOOKING_RESCHEDULED'])('%s clears a stale reason, so a re-book does not keep it', async (trigger) => {
+    sheet.push(leadRow({ Status: 'Cancelled', 'Booking UID': 'bk_1', 'Cancellation Reason': 'Clash with board meeting' }));
+    const h = await loadHandler();
+    await post(h, calRequest(event(trigger, booking({ uid: 'bk_2', rescheduleUid: 'bk_1', metadata: { leadId: 'lead-1' } }))));
+    expect(sheet[1]![COL['Status']!]).not.toBe('Cancelled');
+    expect(sheet[1]![COL['Cancellation Reason']!]).toBe('');
+  });
+
+  it('a stale event or stale cancellation writes nothing, so the reason is untouched', async () => {
+    sheet.push(leadRow({ Status: 'Booked', 'Booking UID': 'bk_newer', 'Cancellation Reason': 'kept' }));
+    const h = await loadHandler();
+    const out = await post(h, calRequest(event('BOOKING_CANCELLED', booking({ uid: 'bk_stale', cancellationReason: 'not applied' }))));
+    expect(out.body).toMatchObject({ ignored: 'stale_cancellation' });
+    expect(sheet[1]![COL['Cancellation Reason']!]).toBe('kept');
+  });
+
+  it('a cancel that appends a row sets the reason on it, and a create that appends leaves it blank', async () => {
+    const h = await loadHandler();
+    await post(h, calRequest(event('BOOKING_CANCELLED', booking({ uid: 'bk_9', attendees: [{ name: 'A', email: 'new@example.com' }], cancellationReason: 'Changed plans' }))));
+    expect(sheet[1]![COL['Cancellation Reason']!]).toBe('Changed plans');
+    expect(sheet[1]![COL['Booking Details']!]).toBe('');
+    await post(h, calRequest(event('BOOKING_CREATED', booking({ uid: 'bk_10', attendees: [{ name: 'B', email: 'other@example.com' }], cancellationReason: 'stray' }))));
+    expect(sheet[2]![COL['Cancellation Reason']!]).toBe('');
+    expect(sheet[2]![COL['Email Check']!]).toBe('');
   });
 
   it('matches by email when the cancel payload has no metadata', async () => {
@@ -444,9 +492,9 @@ describe('booking cancelled', () => {
     const out = await post(h, calRequest(event('BOOKING_CANCELLED', { ...p, cancellationReason: 'No longer needed' })));
     expect(out.body).toMatchObject({ matchedBy: 'email' });
     expect(sheet[1]![COL['Status']!]).toBe('Cancelled');
-    // Field names only: a live cancel's reason never reached Booking Details (2026-10-29), so the log shows where it is.
+    expect(sheet[1]![COL['Cancellation Reason']!]).toBe('No longer needed');
     const synced = JSON.parse(logged(console.log as never, 'CAL_BOOKING_SYNCED')!);
-    expect(synced.payloadKeys).toContain('cancellationReason');
+    expect(synced).not.toHaveProperty('payloadKeys');
     expect(JSON.stringify(synced)).not.toContain('No longer needed');
   });
 
@@ -791,9 +839,10 @@ describe('booking details limits and labels', () => {
   it('records the cancellation reason only on a cancel', async () => {
     const h = await loadHandler();
     await post(h, calRequest(event('BOOKING_CREATED', booking({ cancellationReason: 'stray' }), '2026-10-26T06:01:00.000Z')));
-    expect(sheet[1]![COL['Booking Details']!]).not.toContain('Cancellation reason');
+    expect(sheet[1]![COL['Cancellation Reason']!]).toBe('');
     await post(h, calRequest(event('BOOKING_RESCHEDULED', booking({ cancellationReason: 'stray', rescheduleUid: 'bk_1' }), '2026-10-26T06:02:00.000Z')));
-    expect(sheet[1]![COL['Booking Details']!]).not.toContain('Cancellation reason');
+    expect(sheet[1]![COL['Cancellation Reason']!]).toBe('');
+    expect(sheet[1]![COL['Booking Details']!]).not.toContain('stray');
   });
 });
 
@@ -1019,7 +1068,7 @@ describe('booking answer columns', () => {
     await post(h, calRequest(event('BOOKING_CREATED', booking({ metadata: { leadId: 'lead-1' }, responses: answerResponses() }))));
     for (const [, header, , expected] of ANSWER_TABLE) expect(sheet[1]![COL[header]!]).toBe(expected);
     expect(calls.map((c) => c.method)).toEqual(['GET', 'POST']);
-    const cols = ['Status', 'Call Time (IST)', 'Booking Details', 'Booking UID', 'Last Event At', 'Booked At (IST)', ...ANSWER_HEADERS];
+    const cols = ['Status', 'Call Time (IST)', 'Booking Details', 'Cancellation Reason', 'Booking UID', 'Last Event At', 'Booked At (IST)', ...ANSWER_HEADERS];
     expect(writtenRanges().sort()).toEqual(cols.map((c) => `${columnLetter(COL[c]!)}2`).sort());
   });
 
@@ -1512,6 +1561,6 @@ describe('team-only columns are never written by the webhook', () => {
     expect(sheet[1]![HEADERS.length]).toBe('2026-11-20');
     expect(sheet[1]![COL['Status']!]).toBe('Booked');
     expect(decodeURIComponent(calls[0]!.url.pathname)).toContain(`!A:${LAST_COLUMN_LETTER}`);
-    expect(LAST_COLUMN_LETTER).toBe('AN');
+    expect(LAST_COLUMN_LETTER).toBe('AP');
   });
 });

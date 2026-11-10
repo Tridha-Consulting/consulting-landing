@@ -140,11 +140,8 @@ function capCell(all: string): string {
   return all.slice(0, cut) + TRUNCATED;
 }
 
-/**
- * One `Label: value` line per non-empty response that has no column of its own, plus the
- * cancellation reason on cancel.
- */
-export function bookingDetails(booking: Booking, trigger: BookingTrigger): string {
+/** One `Label: value` line per non-empty response that has no column of its own. */
+export function bookingDetails(booking: Booking): string {
   const lines: string[] = [];
   for (const [key, entry] of Object.entries(booking.responses ?? {})) {
     if (IDENTITY_FIELDS.has(key) || isAnswerKey(key)) continue;
@@ -153,9 +150,12 @@ export function bookingDetails(booking: Booking, trigger: BookingTrigger): strin
     if (!value) continue;
     lines.push(`${labelFor(key, e.label)}: ${value}`);
   }
-  const reason = booking.cancellationReason?.trim();
-  if (trigger === 'BOOKING_CANCELLED' && reason) lines.push(`Cancellation reason: ${reason}`);
   return capCell(lines.join('\n'));
+}
+
+/** The reason on a cancel, '' on a cancel without one and on every other trigger, so a re-book clears a stale reason. */
+export function cancellationReasonFor(booking: Booking, trigger: BookingTrigger): string {
+  return trigger === 'BOOKING_CANCELLED' ? capCell(booking.cancellationReason?.trim() ?? '') : '';
 }
 
 export interface AnswerCell {
@@ -187,6 +187,8 @@ export interface BookingCells {
   status: string;
   callTime: string;
   details: string;
+  /** Cancellation Reason column: the reason on a cancel, '' otherwise (the cell is cleared). */
+  cancellationReason: string;
   /** Mapped booking-form answers with a value; an empty answer is never written, so it cannot blank a cell. */
   answers: AnswerCell[];
   /** First booking time: set on BOOKING_CREATED only, and on update only when the cell is empty; '' means the cell is left alone. */
@@ -274,7 +276,8 @@ export function planBooking(rows: string[][], trigger: BookingTrigger, booking: 
   const cells: BookingCells = {
     status: statusFor(trigger),
     callTime: formatIST(new Date(booking.startTime)),
-    details: bookingDetails(booking, trigger),
+    details: bookingDetails(booking),
+    cancellationReason: cancellationReasonFor(booking, trigger),
     answers: bookingAnswers(booking),
     // A usable envelope time says when the booking was made; otherwise the server clock does.
     bookedAt: trigger === 'BOOKING_CREATED' ? formatIST(event.ms !== undefined ? new Date(event.ms) : now) : '',
@@ -327,6 +330,7 @@ export function planBooking(rows: string[][], trigger: BookingTrigger, booking: 
   values[columnIndex('Call Time (IST)')] = cells.callTime;
   values[columnIndex('Booked At (IST)')] = cells.bookedAt;
   values[columnIndex('Booking Details')] = cells.details;
+  values[columnIndex('Cancellation Reason')] = cells.cancellationReason;
   values[columnIndex('Booking UID')] = cells.uid;
   values[COL.lastEventAt] = cells.lastEventAt;
   for (const a of cells.answers) values[columnIndex(a.header)] = a.value;

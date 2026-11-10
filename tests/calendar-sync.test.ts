@@ -444,7 +444,7 @@ describe('team-only columns and trailing columns', () => {
     expect(out.changes).toHaveLength(1);
     expect(fake.sheet[1]![HEADERS.length]).toBe('2026-11-20');
     expect(fake.sheet[1]![COL['Status']!]).toBe('Declined');
-    expect(decodeURIComponent(fake.sheetCalls[0]!.url.pathname)).toContain('!A:AN');
+    expect(decodeURIComponent(fake.sheetCalls[0]!.url.pathname)).toContain('!A:AP');
   });
 
   it('a middle insert is refused before any write', async () => {

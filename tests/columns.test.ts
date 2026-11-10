@@ -32,7 +32,7 @@ const lead: LeadRow = {
 describe('columns', () => {
   it('has one value per header', () => {
     expect(toRow(lead)).toHaveLength(HEADERS.length);
-    expect(COLUMNS).toHaveLength(40);
+    expect(COLUMNS).toHaveLength(42);
   });
 
   it('orders headers as specified', () => {
@@ -42,12 +42,13 @@ describe('columns', () => {
       'Timeline', 'Decision Maker', 'Booking Details', 'UTM Source', 'UTM Medium', 'UTM Campaign', 'UTM Content',
       'UTM Term', 'fbclid', 'gclid', 'li_fat_id', 'Referrer', 'Landing URL', 'User Agent', 'IP', 'Lead ID',
       'Booking UID', 'Last Event At', 'Channel', 'twclid', 'gbraid', 'wbraid', 'Call Outcome', 'Qualified', 'Setter Notes', 'Deal Value (₹)',
+      'Email Check', 'Cancellation Reason',
     ]);
   });
 
   it('only ever appends: the first 32 headers are the layout the live sheet already holds', () => {
     expect(HEADERS.slice(0, 32).at(-1)).toBe('Last Event At');
-    expect(HEADERS.slice(32)).toEqual(['Channel', 'twclid', 'gbraid', 'wbraid', ...MANUAL_HEADERS]);
+    expect(HEADERS.slice(32)).toEqual(['Channel', 'twclid', 'gbraid', 'wbraid', ...MANUAL_HEADERS, 'Email Check', 'Cancellation Reason']);
   });
 
   it('maps values to the right columns, blank when absent', () => {
@@ -56,7 +57,7 @@ describe('columns', () => {
       '', '', '', '', '', '', '', '', '', '',
       'meta', '', 'oct', '', '', '', 'G1', '', 'https://l.facebook.com/', 'https://consulting.tridha.net/',
       'UA/1.0', '203.0.113.9', '11111111-1111-4111-8111-111111111111', '', '',
-      'Google Ads', '', '', '', '', '', '', '',
+      'Google Ads', '', '', '', '', '', '', '', '', '',
     ]);
   });
 
@@ -88,7 +89,7 @@ describe('columns', () => {
     expect(at('Status')).toBe('New');
     expect(at('Booking Details')).toBe('');
     expect(at('Lead ID')).toBe(lead.leadId);
-    expect(row).toHaveLength(40);
+    expect(row).toHaveLength(42);
   });
 
   it('puts gbraid and wbraid right after twclid and before the team columns, and writes them', () => {
@@ -109,9 +110,21 @@ describe('columns', () => {
     for (const h of MANUAL_HEADERS) expect(row[columnIndex(h)]).toBe('');
   });
 
-  it('keeps the four team columns last, after every column the code fills', () => {
+  it('keeps the four team columns together, followed only by the two columns the code writes', () => {
     expect(MANUAL_HEADERS).toEqual(['Call Outcome', 'Qualified', 'Setter Notes', 'Deal Value (₹)']);
-    expect(HEADERS.slice(-4)).toEqual([...MANUAL_HEADERS]);
+    expect(HEADERS.slice(-6, -2)).toEqual([...MANUAL_HEADERS]);
+    expect(HEADERS.slice(-2)).toEqual(['Email Check', 'Cancellation Reason']);
+  });
+
+  it('writes the email check result under Email Check, and blank when there is none', () => {
+    expect(toRow(lead)[columnIndex('Email Check')]).toBe('');
+    for (const check of ['OK', 'No mail server', 'Unchecked'] as const) {
+      expect(toRow({ ...lead, emailCheck: check })[columnIndex('Email Check')]).toBe(check);
+    }
+  });
+
+  it('writes Cancellation Reason blank on a new lead', () => {
+    expect(toRow({ ...lead, emailCheck: 'OK' })[columnIndex('Cancellation Reason')]).toBe('');
   });
 
   it('joins a single bottleneck without a separator', () => {
@@ -140,8 +153,10 @@ describe('columns', () => {
     expect(columnIndex('Booked At (IST)')).toBe(6);
     expect(columnIndex('Booking UID')).toBe(30);
     expect(columnIndex('Channel')).toBe(32);
+    expect(columnIndex('Email Check')).toBe(40);
+    expect(columnIndex('Cancellation Reason')).toBe(41);
     expect(() => columnIndex('Nope')).toThrow(/unknown sheet column/);
-    expect(LAST_COLUMN_LETTER).toBe('AN');
+    expect(LAST_COLUMN_LETTER).toBe('AP');
   });
 
   it('converts indexes to A1 letters past Z', () => {
@@ -176,7 +191,7 @@ describe('assertSheetLayout', () => {
   });
 
   it('refuses a missing column, at the end or in the middle', () => {
-    expect(() => assertSheetLayout(HEADERS.slice(0, -1))).toThrow(/column AN \(position 40\): expected "Deal Value \(\u20B9\)", found \(empty\)/);
+    expect(() => assertSheetLayout(HEADERS.slice(0, -1))).toThrow(/column AP \(position 42\): expected "Cancellation Reason", found \(empty\)/);
     expect(() => assertSheetLayout(HEADERS.slice(0, 32))).toThrow(/position 33\): expected "Channel"/);
     expect(() => assertSheetLayout([...HEADERS.slice(0, 7), ...HEADERS.slice(8)])).toThrow(SheetLayoutError);
   });

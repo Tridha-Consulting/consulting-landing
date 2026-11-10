@@ -24,7 +24,10 @@ interface Page {
   calls: Call[];
 }
 
-async function loadPage(search = '', calLink = '', response?: { status: number; body: unknown }): Promise<Page> {
+type Reply = { status: number; body: unknown };
+
+/** `response` answers every request; `route` answers per request and may reject to simulate a network failure. */
+async function loadPage(search = '', calLink = '', response?: Reply, route?: (url: string, body: Record<string, unknown>) => Reply | Promise<Reply>): Promise<Page> {
   const dom = new JSDOM(read('index.html'), {
     url: `http://localhost/${search}`,
     runScripts: 'outside-only',
@@ -35,6 +38,9 @@ async function loadPage(search = '', calLink = '', response?: { status: number; 
   const w = window as unknown as Record<string, unknown>;
   w.fetch = vi.fn((url: string, init: Call['init']) => {
     calls.push({ url, init });
+    if (route) {
+      return Promise.resolve(route(url, JSON.parse(init.body))).then((r) => ({ ok: r.status < 400, status: r.status, json: () => Promise.resolve(r.body) }));
+    }
     if (response) {
       return Promise.resolve({ ok: response.status < 400, status: response.status, json: () => Promise.resolve(response.body) });
     }
@@ -270,5 +276,329 @@ describe('js/form.js in jsdom', () => {
     expect(errorText(form, 'phone')).toBe('');
     submit(p, form);
     await vi.waitFor(() => expect(p.calls).toHaveLength(2));
+  });
+});
+
+describe('js/form.js when the email domain has no mail server', () => {
+  const CAL = 'tridha-consulting/exploration-call';
+  const LEAD_ID = '11111111-1111-4111-8111-111111111111';
+  const FIX_TOKEN = 'fix-token-1';
+  const notOk: Reply = { status: 200, body: { ok: true, leadId: LEAD_ID, emailOk: false, fixToken: FIX_TOKEN } };
+  const goodReply: Reply = { status: 200, body: { ok: true, leadId: LEAD_ID, emailOk: true } };
+
+  interface Fixed extends Page {
+    prefills: Record<string, string>[];
+    lead: () => HTMLFormElement;
+    fixCalls: () => Call[];
+  }
+
+  function stubMount(p: Page): Record<string, string>[] {
+    const prefills: Record<string, string>[] = [];
+    const booking = (p.window as unknown as { trdBooking: { mount: unknown } }).trdBooking;
+    booking.mount = (_host: unknown, prefill: Record<string, string>) => {
+      prefills.push(prefill);
+      return true;
+    };
+    return prefills;
+  }
+
+  /** Loads the page, submits a valid lead and waits for the fix step. `emailReply` answers /api/lead-email. */
+  async function reachFixStep(emailReply: Reply | (() => Reply | Promise<Reply>) = goodReply, calLink = CAL): Promise<Fixed> {
+    const p = await loadPage('', calLink, undefined, (url) => {
+      if (url === '/api/lead') return notOk;
+      return typeof emailReply === 'function' ? emailReply() : emailReply;
+    });
+    const prefills = stubMount(p);
+    const form = openForm(p);
+    fillValid(p, form);
+    submit(p, form);
+    await vi.waitFor(() => expect(p.document.querySelector('.trd-fix')).not.toBeNull());
+    return { ...p, prefills, lead: () => p.document.querySelector('.trd-fix') as HTMLFormElement, fixCalls: () => p.calls.filter((c) => c.url === '/api/lead-email') };
+  }
+
+  const fixInput = (p: Page) => p.document.querySelector('.trd-fix input[name="fix_email"]') as HTMLInputElement;
+  const fixError = (p: Page) => (p.document.querySelector('.trd-fix .trd-error')?.textContent ?? '').trim();
+  const fixFormError = (p: Page) => (p.document.querySelector('.trd-fix .trd-submit-error')?.textContent ?? '').trim();
+  const continueBtn = (p: Page) => p.document.querySelector('.trd-fix button[type="submit"]') as HTMLButtonElement;
+  const skipBtn = (p: Page) => p.document.querySelector('.trd-fix .trd-skip') as HTMLButtonElement;
+  function type(p: Page, value: string) {
+    const input = fixInput(p);
+    input.value = value;
+    input.dispatchEvent(new p.window.Event('input', { bubbles: true }));
+  }
+  function cont(p: Fixed) {
+    p.lead().dispatchEvent(new p.window.Event('submit', { bubbles: true, cancelable: true }));
+  }
+
+  it('emailOk false shows the fix step instead of the calendar, with the saved address prefilled', async () => {
+    const p = await reachFixStep();
+    expect(p.prefills).toHaveLength(0);
+    expect(p.document.querySelector('.trd-booking')).toBeNull();
+    expect(p.document.querySelector('.trd-thanks')).toBeNull();
+    expect(p.document.querySelector('form:not(.trd-fix)')).toBeNull();
+    const text = p.document.querySelector('.trd-fix-title')?.textContent ?? '';
+    expect(text).toContain("We've saved your details.");
+    expect(text).toContain("couldn't find a mail server for acme-industries.com");
+    expect(text).toContain("your booking confirmation wouldn't reach you. Please check your email:");
+    expect(fixInput(p).value).toBe('asha@acme-industries.com');
+    expect(continueBtn(p).textContent).toBe('Continue to booking');
+    expect(skipBtn(p).textContent).toBe('Skip — just call me');
+    // The lead was posted once, and nothing else yet.
+    expect(p.calls.map((c) => c.url)).toEqual(['/api/lead']);
+    expect(p.document.activeElement?.className).toBe('trd-fix-title');
+  });
+
+  it('Continue with a corrected address posts the lead id and address, then opens the calendar prefilled with it', async () => {
+    const p = await reachFixStep();
+    type(p, '  asha@acme.org ');
+    cont(p);
+    await vi.waitFor(() => expect(p.prefills).toHaveLength(1));
+    expect(p.fixCalls()).toHaveLength(1);
+    const call = p.fixCalls()[0]!;
+    expect(call.init.method).toBe('POST');
+    expect(JSON.parse(call.init.body)).toEqual({ leadId: LEAD_ID, email: 'asha@acme.org', fixToken: FIX_TOKEN });
+    expect(p.prefills[0]).toMatchObject({ email: 'asha@acme.org', leadId: LEAD_ID, name: 'Asha Rao', company: 'Acme Industries', phone: '+919876543210' });
+    expect(p.document.querySelector('.trd-fix')).toBeNull();
+    expect(p.document.querySelector('.trd-booking')).not.toBeNull();
+    // No second lead is created: the lead endpoint was called once.
+    expect(p.calls.filter((c) => c.url === '/api/lead')).toHaveLength(1);
+  });
+
+  it('the Continue button shows a working state while the check runs, and ignores a second press', async () => {
+    let release!: (r: Reply) => void;
+    const pending = new Promise<Reply>((r) => {
+      release = r;
+    });
+    const p = await reachFixStep(() => pending);
+    cont(p);
+    await vi.waitFor(() => expect(p.fixCalls()).toHaveLength(1));
+    expect(continueBtn(p).disabled).toBe(true);
+    expect(continueBtn(p).textContent).toBe('Checking');
+    cont(p);
+    expect(p.fixCalls()).toHaveLength(1);
+    release(goodReply);
+    await vi.waitFor(() => expect(p.prefills).toHaveLength(1));
+  });
+
+  it('with no CAL_LINK to open, a successful correction shows the thank-you', async () => {
+    const p = await reachFixStep(goodReply, '');
+    type(p, 'asha@acme.org');
+    cont(p);
+    await vi.waitFor(() => expect(p.document.querySelector('.trd-thanks')).not.toBeNull());
+    expect(p.document.querySelector('.trd-fix')).toBeNull();
+  });
+
+  it('Skip shows the existing thank-you screen and sends nothing', async () => {
+    const p = await reachFixStep();
+    skipBtn(p).click();
+    const thanks = p.document.querySelector('.trd-thanks') as HTMLElement;
+    expect(thanks.textContent).toBe('Thank you — our team will call you shortly.');
+    expect(p.document.querySelector('.trd-fix')).toBeNull();
+    expect(p.fixCalls()).toHaveLength(0);
+    expect(p.prefills).toHaveLength(0);
+    expect(p.document.activeElement).toBe(thanks);
+  });
+
+  it('Continue with an address that still has no mail server keeps the step and shows an error', async () => {
+    const p = await reachFixStep(notOk);
+    type(p, 'asha@acme-industriez.com');
+    cont(p);
+    await vi.waitFor(() => expect(fixError(p)).toContain("We still can't find a mail server for acme-industriez.com"));
+    expect(p.document.querySelector('.trd-fix')).not.toBeNull();
+    expect(p.prefills).toHaveLength(0);
+    expect(continueBtn(p).disabled).toBe(false);
+    expect(continueBtn(p).textContent).toBe('Continue to booking');
+    expect(fixInput(p).getAttribute('aria-invalid')).toBe('true');
+    expect(p.document.activeElement).toBe(fixInput(p));
+    // Typing again clears the error, and the visitor can still skip.
+    type(p, 'asha@acme.org');
+    expect(fixError(p)).toBe('');
+    skipBtn(p).click();
+    expect(p.document.querySelector('.trd-thanks')).not.toBeNull();
+  });
+
+  it('a network failure shows the generic error with the contact, and the visitor can retry', async () => {
+    let down = true;
+    const p = await reachFixStep(() => (down ? Promise.reject(new TypeError('network down')) : goodReply));
+    cont(p);
+    await vi.waitFor(() => expect(fixFormError(p)).toContain('something went wrong'));
+    expect(fixFormError(p)).toContain('contact@tridha.net');
+    expect(p.document.querySelector('.trd-fix a')?.getAttribute('href')).toBe('mailto:contact@tridha.net');
+    expect(continueBtn(p).disabled).toBe(false);
+    expect(p.prefills).toHaveLength(0);
+    down = false;
+    cont(p);
+    await vi.waitFor(() => expect(p.prefills).toHaveLength(1));
+  });
+
+  it.each([500, 502, 403, 404])('a %i from the email endpoint shows the generic error and keeps the step, which can still be skipped', async (status) => {
+    const p = await reachFixStep({ status, body: { ok: false, error: 'x' } });
+    cont(p);
+    await vi.waitFor(() => expect(fixFormError(p)).toContain('something went wrong'));
+    expect(p.document.querySelector('.trd-fix')).not.toBeNull();
+    expect(p.prefills).toHaveLength(0);
+    skipBtn(p).click();
+    expect(p.document.querySelector('.trd-thanks')).not.toBeNull();
+  });
+
+  it('a server validation message for the email is shown on the field', async () => {
+    const p = await reachFixStep({ status: 400, body: { ok: false, error: 'validation_failed', fields: { email: ['Enter a valid email'] } } });
+    cont(p);
+    await vi.waitFor(() => expect(fixError(p)).toBe('Enter a valid email'));
+    expect(p.prefills).toHaveLength(0);
+  });
+
+  it('checks the address on the client first: an invalid one sends nothing', async () => {
+    const p = await reachFixStep();
+    type(p, 'not-an-email');
+    cont(p);
+    expect(fixError(p)).toBe('Please enter a valid email address.');
+    type(p, '');
+    cont(p);
+    expect(fixError(p)).toBe('Please enter your email address.');
+    expect(p.fixCalls()).toHaveLength(0);
+  });
+
+  it('runs the typo hint on this input too: a hint first, then the suggestion goes through', async () => {
+    const p = await reachFixStep();
+    type(p, 'asha@gmial.com');
+    cont(p);
+    expect(fixError(p)).toBe('Did you mean asha@gmail.com?');
+    expect(p.fixCalls()).toHaveLength(0);
+    (p.document.querySelector('.trd-fix .trd-error .trd-suggest') as HTMLButtonElement).click();
+    expect(fixInput(p).value).toBe('asha@gmail.com');
+    expect(fixError(p)).toBe('');
+    cont(p);
+    await vi.waitFor(() => expect(p.prefills).toHaveLength(1));
+    expect(JSON.parse(p.fixCalls()[0]!.init.body).email).toBe('asha@gmail.com');
+    expect(p.prefills[0]).toMatchObject({ email: 'asha@gmail.com' });
+  });
+
+  it('keeps an address the visitor has already been asked about, like the main form does', async () => {
+    const p = await reachFixStep();
+    type(p, 'asha@gmial.com');
+    cont(p);
+    expect(p.fixCalls()).toHaveLength(0);
+    cont(p);
+    await vi.waitFor(() => expect(p.fixCalls()).toHaveLength(1));
+    expect(JSON.parse(p.fixCalls()[0]!.init.body).email).toBe('asha@gmial.com');
+  });
+
+  it('emailOk true, or no emailOk at all, goes straight to the calendar with the typed address and never shows the step', async () => {
+    for (const body of [{ ok: true, leadId: LEAD_ID, emailOk: true }, { ok: true, leadId: LEAD_ID }]) {
+      const p = await loadPage('', CAL, { status: 200, body });
+      const prefills = stubMount(p);
+      const form = openForm(p);
+      fillValid(p, form);
+      submit(p, form);
+      await vi.waitFor(() => expect(prefills).toHaveLength(1));
+      expect(prefills[0]).toMatchObject({ email: 'asha@acme-industries.com', leadId: LEAD_ID });
+      expect(p.document.querySelector('.trd-fix')).toBeNull();
+    }
+  });
+
+  it('closing and reopening the modal on the fix step returns focus to it', async () => {
+    const p = await reachFixStep();
+    (p.document.querySelector('.trd-close') as HTMLElement).click();
+    expect(p.document.querySelector('.trd-overlay')!.classList.contains('is-open')).toBe(false);
+    (p.document.querySelector('.trd-book-btn') as HTMLElement).click();
+    expect(p.document.activeElement?.className).toBe('trd-fix-title');
+    expect(p.document.querySelector('.trd-fix')).not.toBeNull();
+  });
+
+  it('a 409 shows a short message with the contact, keeps the step, and Skip still works', async () => {
+    const p = await reachFixStep({ status: 409, body: { ok: false, error: 'not_correctable' } });
+    cont(p);
+    await vi.waitFor(() => expect(fixFormError(p)).toContain("We can't update your email here"));
+    expect(fixFormError(p)).toContain('contact@tridha.net');
+    expect(fixFormError(p)).not.toContain('something went wrong');
+    expect(p.document.querySelector('.trd-fix')).not.toBeNull();
+    expect(continueBtn(p).disabled).toBe(false);
+    skipBtn(p).click();
+    expect(p.document.querySelector('.trd-thanks')).not.toBeNull();
+  });
+
+  it('sends the fixToken the lead answer carried', async () => {
+    const p = await reachFixStep();
+    cont(p);
+    await vi.waitFor(() => expect(p.fixCalls()).toHaveLength(1));
+    expect(JSON.parse(p.fixCalls()[0]!.init.body).fixToken).toBe(FIX_TOKEN);
+  });
+
+  it('emailOk false with no fixToken (the server cannot issue one) goes to the thank-you: no step, no calendar', async () => {
+    const p = await loadPage('', CAL, { status: 200, body: { ok: true, leadId: LEAD_ID, emailOk: false } });
+    const prefills = stubMount(p);
+    const form = openForm(p);
+    fillValid(p, form);
+    submit(p, form);
+    await vi.waitFor(() => expect(p.document.querySelector('.trd-thanks')).not.toBeNull());
+    expect(p.document.querySelector('.trd-fix')).toBeNull();
+    expect(prefills).toHaveLength(0);
+    expect(p.calls).toHaveLength(1);
+  });
+
+  it('links the instruction text and the error to the input', async () => {
+    const p = await reachFixStep();
+    const ids = (fixInput(p).getAttribute('aria-describedby') ?? '').split(' ');
+    expect(ids).toHaveLength(2);
+    expect(p.document.getElementById(ids[0]!)).toBe(p.document.querySelector('.trd-fix-title'));
+    expect(p.document.getElementById(ids[1]!)).toBe(p.document.querySelector('.trd-fix .trd-error'));
+  });
+
+  it('Skip while a correction is in flight aborts it, shows the thank-you, and a late answer opens nothing', async () => {
+    let release!: (r: Reply) => void;
+    const pending = new Promise<Reply>((r) => {
+      release = r;
+    });
+    const p = await reachFixStep(() => pending);
+    cont(p);
+    await vi.waitFor(() => expect(p.fixCalls()).toHaveLength(1));
+    const signal = (p.fixCalls()[0]!.init as unknown as { signal: AbortSignal }).signal;
+    expect(signal.aborted).toBe(false);
+    skipBtn(p).click();
+    expect(signal.aborted).toBe(true);
+    expect(p.document.querySelector('.trd-thanks')).not.toBeNull();
+    expect(p.document.querySelector('.trd-fix')).toBeNull();
+    release(goodReply);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(p.prefills).toHaveLength(0);
+    expect(p.document.querySelector('.trd-booking')).toBeNull();
+    expect(p.document.querySelector('.trd-thanks')).not.toBeNull();
+  });
+
+  it('a request that takes 15 seconds is aborted and shows the generic error, and the visitor can retry', async () => {
+    const p = await reachFixStep();
+    const w = p.window as unknown as { fetch: unknown; setTimeout: unknown; DOMException: typeof DOMException };
+    const timers: [() => void, number][] = [];
+    w.setTimeout = (fn: () => void, ms: number) => {
+      timers.push([fn, ms]);
+      return timers.length;
+    };
+    w.fetch = (url: string, init: Call['init'] & { signal: AbortSignal }) => {
+      p.calls.push({ url, init });
+      return new Promise((_, reject) => {
+        init.signal.addEventListener('abort', () => reject(new w.DOMException('aborted', 'AbortError')));
+      });
+    };
+    cont(p);
+    await vi.waitFor(() => expect(p.fixCalls()).toHaveLength(1));
+    expect(timers.map((t) => t[1])).toContain(15000);
+    timers.find((t) => t[1] === 15000)![0]();
+    await vi.waitFor(() => expect(fixFormError(p)).toContain('something went wrong'));
+    expect(continueBtn(p).disabled).toBe(false);
+    expect(p.document.querySelector('.trd-fix')).not.toBeNull();
+    expect(p.prefills).toHaveLength(0);
+  });
+
+  it('inserts the domain as text: markup in it cannot create an element (render helper called directly)', async () => {
+    const p = await loadPage();
+    const forms = p.window as unknown as { trdForm: { fixTitle: (domain: string, id: string) => HTMLElement } };
+    const evil = '<img src=x onerror=alert(1)>.example.com';
+    const title = forms.trdForm.fixTitle(evil, 'fix-title');
+    expect(title.id).toBe('fix-title');
+    expect(title.querySelector('img')).toBeNull();
+    expect(title.querySelectorAll('*')).toHaveLength(1);
+    expect(title.querySelector('strong')?.textContent).toBe(evil);
+    expect(title.textContent).toContain(`mail server for ${evil}, so your booking`);
   });
 });

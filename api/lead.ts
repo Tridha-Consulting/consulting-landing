@@ -1,47 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import { classifyChannel } from '../lib/channel.js';
+import { EMAIL_CHECK, checkEmailDomain } from '../lib/email-domain.js';
 import { EVENT_LOG_DEADLINE_MS, logEvents } from '../lib/event-log.js';
+import { fixTokenFor } from '../lib/fix-token.js';
+import { BodyError, clientIp, json, methodNotAllowed, readJsonObject } from '../lib/http.js';
 import { leadSchema } from '../lib/schema.js';
 import { STATUS, type LeadRow } from '../lib/columns.js';
 import type { LeadSink } from '../lib/sinks/index.js';
 
-// Web-standard handlers (named method exports). Vercel's Node helper layer, which pre-drains
-// the request stream into req.body, is not in the path, so the body is read here exactly once.
+// Web-standard handlers (named method exports); the request helpers are in lib/http.ts.
 
 // Largest valid body: 12 answers (~1 KB), thirteen attribution fields of 500 characters, a Turnstile token
 // (up to 2 KB), and up to 3 bytes per UTF-16 unit for non-Latin text. That worst case is about 24.1 KB
 // (about 10 KB when ASCII), so the 32 KiB cap leaves room for a few more fields. tests/handler.test.ts builds it.
 const MAX_BODY_BYTES = 32 * 1024;
 const TURNSTILE_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
-
-class BodyError extends Error {
-  constructor(readonly status: number, message: string) {
-    super(message);
-  }
-}
-
-function json(status: number, body: unknown, headers?: Record<string, string>): Response {
-  return Response.json(body, { status, headers });
-}
-
-async function readJson(request: Request): Promise<unknown> {
-  const declared = Number(request.headers.get('content-length') ?? 0);
-  if (declared > MAX_BODY_BYTES) throw new BodyError(413, 'payload_too_large');
-
-  const raw = await request.text();
-  if (Buffer.byteLength(raw) > MAX_BODY_BYTES) throw new BodyError(413, 'payload_too_large');
-
-  try {
-    return JSON.parse(raw);
-  } catch {
-    throw new BodyError(400, 'invalid_json');
-  }
-}
-
-function clientIp(request: Request): string {
-  const fwd = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
-  return fwd || (request.headers.get('x-real-ip') ?? '').trim();
-}
 
 interface TurnstileVerdict {
   success: boolean;
@@ -68,9 +41,7 @@ function submittedLead(body: Record<string, unknown>): Record<string, unknown> {
 export async function POST(request: Request): Promise<Response> {
   let body: Record<string, unknown>;
   try {
-    const parsed = await readJson(request);
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new BodyError(400, 'invalid_json');
-    body = parsed as Record<string, unknown>;
+    body = await readJsonObject(request, MAX_BODY_BYTES);
   } catch (err) {
     if (err instanceof BodyError) return json(err.status, { ok: false, error: err.message });
     return json(400, { ok: false, error: 'invalid_request' });
@@ -134,12 +105,16 @@ export async function POST(request: Request): Promise<Response> {
     return json(500, { ok: false, error: 'server_misconfigured' });
   }
 
+  // A domain with no mail server still gets its row; the form then asks for a corrected address.
+  const emailCheck = await checkEmailDomain(parsed.data.email);
+
   const lead: LeadRow = {
     ...parsed.data,
     leadId: randomUUID(),
     submittedAt: new Date(),
     userAgent: (request.headers.get('user-agent') ?? '').slice(0, 500),
     ip,
+    emailCheck,
   };
 
   const results = await Promise.allSettled(sinks.map((s) => s.write(lead)));
@@ -156,19 +131,21 @@ export async function POST(request: Request): Promise<Response> {
 
   if (written === 0) return json(502, { ok: false, error: 'write_failed' });
 
-  console.log(JSON.stringify({ event: 'LEAD_WRITTEN', leadId: lead.leadId }));
+  console.log(JSON.stringify({ event: 'LEAD_WRITTEN', leadId: lead.leadId, emailCheck }));
   // Best-effort audit row after the lead is stored; logEvents never throws, so the response is unchanged,
   // and the deadline caps the time a stuck Events write can add to it.
   await logEvents([{ event: 'Lead submitted', source: 'form', leadId: lead.leadId, statusTo: STATUS.new, detail: classifyChannel(lead) }], {
     deadlineMs: EVENT_LOG_DEADLINE_MS,
   });
-  return json(200, { ok: true, leadId: lead.leadId });
+  const emailOk = emailCheck !== EMAIL_CHECK.noMailServer;
+  if (emailOk) return json(200, { ok: true, leadId: lead.leadId, emailOk });
+  // The token that lets the form correct this row's email (/api/lead-email). Without CRON_SECRET the lead is
+  // still saved and the form skips the correction step.
+  const fixToken = fixTokenFor(lead.leadId);
+  if (!fixToken) console.error(JSON.stringify({ event: 'LEAD_FIX_TOKEN_UNAVAILABLE', leadId: lead.leadId, error: 'Missing environment variable: CRON_SECRET' }));
+  return json(200, { ok: true, leadId: lead.leadId, emailOk, ...(fixToken && { fixToken }) });
 }
 
-// Any other method gets a JSON 405 (Vercel's default for an unexported method is an empty body).
-function methodNotAllowed(): Response {
-  return json(405, { ok: false, error: 'method_not_allowed' }, { Allow: 'POST' });
-}
 export const GET = methodNotAllowed;
 export const HEAD = methodNotAllowed;
 export const OPTIONS = methodNotAllowed;

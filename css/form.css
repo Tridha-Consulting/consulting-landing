@@ -89,6 +89,11 @@
 @keyframes trd-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .trd-spinner { animation-duration: 2s; } }
 
+/* Email step shown when the address's domain has no mail server (js/form.js, showEmailFix). */
+.trd-fix-title { margin: 0 32px 12px 0; font-size: 15px; line-height: 1.5; color: #101828; }
+.trd-fix-title:focus { outline: none; }
+.trd-skip { font-size: 14px; color: #475467; }
+
 .trd-thanks { padding: 24px 8px; text-align: center; font-size: 17px; color: #101828; }
 .trd-thanks:focus { outline: none; }
 .trd-hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }

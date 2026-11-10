@@ -1,4 +1,5 @@
 import { classifyChannel } from './channel.js';
+import type { EmailCheck } from './email-domain.js';
 import { BOTTLENECK_OPTIONS, type LeadInput } from './schema.js';
 
 /** Qualification answers. A lead from the site form always has them; a row built from a Cal booking alone may not. */
@@ -10,6 +11,8 @@ export interface LeadRow extends Omit<LeadInput, AnswerKey>, Partial<Pick<LeadIn
   submittedAt: Date;
   userAgent: string;
   ip: string;
+  /** Result of the mail-server lookup on the email's domain (lib/email-domain.ts); absent on a row built from a Cal booking. */
+  emailCheck?: EmailCheck;
 }
 
 export interface Column {
@@ -38,8 +41,9 @@ export const STATUS = {
  * While the sheet holds no data rows the layout may be reordered freely. Once it does, columns are
  * only ever appended: reordering would misalign every existing row against the new headers.
  * Call, booking and event columns are filled by /api/cal-webhook; a fresh lead from /api/lead leaves them blank.
- * The last four columns (MANUAL_HEADERS) belong to the team: the code writes them blank on a new row
- * and no updater ever addresses them.
+ * Four columns (MANUAL_HEADERS) belong to the team: the code writes them blank on
+ * a new row and no updater ever addresses them. The two columns after them, Email Check and Cancellation
+ * Reason, are written by code only (/api/lead and /api/lead-email, /api/cal-webhook).
  */
 export const COLUMNS: readonly Column[] = [
   { header: 'Submitted At (IST)', value: (l) => formatIST(l.submittedAt) },
@@ -63,7 +67,7 @@ export const COLUMNS: readonly Column[] = [
   { header: 'Tech Team', value: (l) => l.techTeam ?? '' },
   { header: 'Timeline', value: (l) => l.timeline ?? '' },
   { header: 'Decision Maker', value: (l) => l.decisionMaker ?? '' },
-  // Booking answers that have no column of their own, plus the cancellation reason.
+  // Booking answers that have no column of their own. The cancellation reason has its own column, Cancellation Reason.
   { header: 'Booking Details', value: () => '' },
   { header: 'UTM Source', value: (l) => l.utmSource ?? '' },
   { header: 'UTM Medium', value: (l) => l.utmMedium ?? '' },
@@ -92,11 +96,17 @@ export const COLUMNS: readonly Column[] = [
   { header: 'Qualified', value: () => '' },
   { header: 'Setter Notes', value: () => '' },
   { header: 'Deal Value (₹)', value: () => '' },
+  // Written by code. They follow the team columns only because columns are append-only. Email Check is
+  // the lib/email-domain.ts result for the address in Email: OK, No mail server or Unchecked. A row
+  // built from a Cal booking has none.
+  { header: 'Email Check', value: (l) => l.emailCheck ?? '' },
+  // The reason the lead gave when cancelling: set by a BOOKING_CANCELLED, cleared by a later booking.
+  { header: 'Cancellation Reason', value: () => '' },
 ];
 
 export const HEADERS: string[] = COLUMNS.map((c) => c.header);
 
-/** The columns the team fills by hand. No code path may write them after the row is appended; the describe blocks "team-only columns are never written by the webhook" (tests/cal-webhook.test.ts) and "team-only columns and trailing columns" (tests/calendar-sync.test.ts) hold that. */
+/** The columns the team fills by hand; they sit before Email Check and Cancellation Reason. No code path may write them after the row is appended; the describe blocks "team-only columns are never written by the webhook" (tests/cal-webhook.test.ts) and "team-only columns and trailing columns" (tests/calendar-sync.test.ts) hold that. */
 export const MANUAL_HEADERS: readonly string[] = ['Call Outcome', 'Qualified', 'Setter Notes', 'Deal Value (₹)'];
 
 export function toRow(lead: LeadRow): string[] {

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as lead from '../api/lead.js';
-import { toRow } from '../lib/columns.js';
+import { columnIndex, toRow } from '../lib/columns.js';
+import { fixTokenFor } from '../lib/fix-token.js';
 import { BOTTLENECK_OPTIONS } from '../lib/schema.js';
 import { makeRequest, readJsonResponse, validBody } from './helpers.js';
 
@@ -13,6 +14,13 @@ vi.mock('../lib/event-log.js', async (importActual) => ({
   logEvents: (e: unknown, o: unknown) => logEvents(e, o),
 }));
 
+// The MX lookup has its own tests (tests/email-domain.test.ts); here the handler is given a verdict.
+const checkEmailDomain = vi.fn();
+vi.mock('../lib/email-domain.js', async (importActual) => ({
+  ...(await importActual<typeof import('../lib/email-domain.js')>()),
+  checkEmailDomain: (e: unknown) => checkEmailDomain(e),
+}));
+
 let errSpy: ReturnType<typeof vi.spyOn>;
 let logSpy: ReturnType<typeof vi.spyOn>;
 
@@ -21,6 +29,8 @@ beforeEach(() => {
   write.mockResolvedValue(undefined);
   logEvents.mockReset();
   logEvents.mockResolvedValue(undefined);
+  checkEmailDomain.mockReset();
+  checkEmailDomain.mockResolvedValue('OK');
   errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
   logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 });
@@ -171,12 +181,65 @@ describe('POST /api/lead', () => {
   it('success -> 200 with leadId, logs LEAD_WRITTEN, passes server fields to the sink', async () => {
     const out = await call('POST', validBody, { 'x-forwarded-for': '203.0.113.9, 10.0.0.1', 'user-agent': 'UA/1' });
     expect(out.statusCode).toBe(200);
-    const body = out.body as { ok: boolean; leadId: string };
+    const body = out.body as { ok: boolean; leadId: string; emailOk: boolean };
     expect(body.ok).toBe(true);
+    expect(body.emailOk).toBe(true);
     expect(body.leadId).toMatch(/^[0-9a-f-]{36}$/);
     expect(write).toHaveBeenCalledTimes(1);
     expect(write.mock.calls[0]![0]).toMatchObject({ leadId: body.leadId, ip: '203.0.113.9', userAgent: 'UA/1' });
-    expect(JSON.parse(String(logSpy.mock.calls[0]![0]))).toEqual({ event: 'LEAD_WRITTEN', leadId: body.leadId });
+    expect(JSON.parse(String(logSpy.mock.calls[0]![0]))).toEqual({ event: 'LEAD_WRITTEN', leadId: body.leadId, emailCheck: 'OK' });
+  });
+});
+
+describe('POST /api/lead email check', () => {
+  it.each([
+    ['OK', true],
+    ['Unchecked', true],
+    ['No mail server', false],
+  ])('a lookup result of %s writes it to the row and answers emailOk %s', async (check, emailOk) => {
+    checkEmailDomain.mockResolvedValue(check);
+    const out = await call('POST', validBody);
+    expect(out.statusCode).toBe(200);
+    expect(out.body).toEqual({ ok: true, leadId: expect.any(String), emailOk });
+    expect(checkEmailDomain).toHaveBeenCalledWith('asha@example.com');
+    expect(write).toHaveBeenCalledTimes(1);
+    const lead = write.mock.calls[0]![0] as Parameters<typeof toRow>[0];
+    expect(lead.emailCheck).toBe(check);
+    expect(toRow(lead)[columnIndex('Email Check')]).toBe(check);
+    expect(toRow(lead)[columnIndex('Cancellation Reason')]).toBe('');
+    expect(JSON.parse(String(logSpy.mock.calls[0]![0]))).toMatchObject({ event: 'LEAD_WRITTEN', emailCheck: check });
+  });
+
+  it('a domain with no mail server still gets its row, and the audit event is unchanged', async () => {
+    checkEmailDomain.mockResolvedValue('No mail server');
+    const out = await call('POST', { ...validBody, email: 'asha@gmial.co' });
+    expect(out.body).toMatchObject({ ok: true, emailOk: false });
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(logEvents.mock.calls[0]![0][0]).toMatchObject({ event: 'Lead submitted', source: 'form' });
+  });
+
+  it('checks the validated, trimmed address, and not at all for an invalid one', async () => {
+    await call('POST', { ...validBody, email: '  asha@example.com ' });
+    expect(checkEmailDomain).toHaveBeenCalledWith('asha@example.com');
+    checkEmailDomain.mockClear();
+    expect((await call('POST', { ...validBody, email: 'nope' })).statusCode).toBe(400);
+    expect(checkEmailDomain).not.toHaveBeenCalled();
+  });
+
+  it('a resolver that cannot be constructed never loses the lead: the row is written Unchecked and the answer is ok', async () => {
+    // The real checkEmailDomain with its default resolver, whose constructor throws under tests/setup.ts.
+    const { checkEmailDomain: real } = await vi.importActual<typeof import('../lib/email-domain.js')>('../lib/email-domain.js');
+    checkEmailDomain.mockImplementation((e: string) => real(e));
+    const out = await call('POST', validBody);
+    expect(out.statusCode).toBe(200);
+    expect(out.body).toEqual({ ok: true, leadId: expect.any(String), emailOk: true });
+    expect(write).toHaveBeenCalledTimes(1);
+    expect((write.mock.calls[0]![0] as { emailCheck: string }).emailCheck).toBe('Unchecked');
+  });
+
+  it('the honeypot does no lookup', async () => {
+    await call('POST', { ...validBody, company_website: 'http://spam' });
+    expect(checkEmailDomain).not.toHaveBeenCalled();
   });
 });
 
@@ -200,7 +263,8 @@ describe('POST /api/lead audit event', () => {
   it('writes the channel and click id to the row', async () => {
     await call('POST', { ...validBody, utmSource: undefined, twclid: 'T1' });
     const row = toRow(write.mock.calls[0]![0] as Parameters<typeof toRow>[0]);
-    expect(row.slice(-8)).toEqual(['X Ads', 'T1', '', '', '', '', '', '']);
+    // Channel, twclid, gbraid, wbraid, the four team columns, then Email Check ('OK' from the mocked lookup) and Cancellation Reason.
+    expect(row.slice(-10)).toEqual(['X Ads', 'T1', '', '', '', '', '', '', 'OK', '']);
   });
 
   it('no event when the lead is not stored: write failure, validation failure, honeypot', async () => {
@@ -269,5 +333,34 @@ describe('Turnstile', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ success: true }) }));
     expect((await call('POST', { ...validBody, turnstileToken: 'good' })).statusCode).toBe(200);
     expect(write).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('POST /api/lead fixToken', () => {
+  beforeEach(() => vi.stubEnv('CRON_SECRET', 'cron-secret-test'));
+
+  it('a domain with no mail server also returns the token for the new lead id', async () => {
+    checkEmailDomain.mockResolvedValue('No mail server');
+    const out = await call('POST', validBody);
+    const body = out.body as { leadId: string; emailOk: boolean; fixToken: string };
+    expect(body.emailOk).toBe(false);
+    expect(body.fixToken).toBe(fixTokenFor(body.leadId));
+    expect(body.fixToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+
+  it.each(['OK', 'Unchecked'])('a lookup result of %s returns no token', async (check) => {
+    checkEmailDomain.mockResolvedValue(check);
+    const out = await call('POST', validBody);
+    expect(out.body).not.toHaveProperty('fixToken');
+  });
+
+  it('without CRON_SECRET the lead is still saved and answered, with no token, and the gap is logged', async () => {
+    vi.stubEnv('CRON_SECRET', '');
+    checkEmailDomain.mockResolvedValue('No mail server');
+    const out = await call('POST', validBody);
+    expect(out.statusCode).toBe(200);
+    expect(out.body).toEqual({ ok: true, leadId: expect.any(String), emailOk: false });
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(loggedEvent(errSpy, 'LEAD_FIX_TOKEN_UNAVAILABLE')).toMatchObject({ leadId: (out.body as { leadId: string }).leadId });
   });
 });

@@ -1,9 +1,12 @@
-/* Lead form: modal with every question on one scrolling page, one POST to /api/lead. Never navigates. */
+/* Lead form: modal with every question on one scrolling page, one POST to /api/lead. Never navigates.
+   When /api/lead reports that the email domain has no mail server, the modal first asks for a corrected
+   address (POST /api/lead-email) and only then opens the calendar. */
 (function () {
   'use strict';
 
   var CFG = window.TRIDHA_CONFIG || {};
   var ENDPOINT = '/api/lead';
+  var EMAIL_ENDPOINT = '/api/lead-email';
   var ATTR_KEY = 'tridha_attribution';
   var ATTR_PARAMS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid', 'gclid', 'li_fat_id', 'twclid', 'gbraid', 'wbraid'];
 
@@ -123,11 +126,11 @@
   /* ---------- validation ---------- */
   function digitsOnly(s) { return String(s).replace(/\D/g, ''); }
 
-  /* One leading trunk 0 is dropped for every country except Italy (+39), whose numbers keep it.
+  /* Every leading trunk 0 is dropped for every country except Italy (+39), whose numbers keep it.
      Counterpart: normalisePhone in lib/schema.ts. */
   function nationalDigits(dial, value) {
     var n = digitsOnly(value);
-    return dial === '39' ? n : n.replace(/^0/, '');
+    return dial === '39' ? n : n.replace(/^0+/, '');
   }
 
   function validate(field, value, dial) {
@@ -277,7 +280,7 @@
     form.addEventListener('submit', onSubmit);
     FIELD_ORDER.forEach(function (k) {
       if (choices[k]) return;
-      inputs[k].addEventListener('input', function () { setError(k, ''); submitErr.textContent = ''; if (k === 'email') keptEmail = null; });
+      inputs[k].addEventListener('input', function () { setError(k, ''); submitErr.textContent = ''; if (k === 'email') formMemo.kept = null; });
     });
     inputs.dial.addEventListener('change', function () { setError('phone', ''); });
     overlay.addEventListener('keydown', trapTab);
@@ -338,29 +341,36 @@
     }
   }
 
-  /* Typo advice for the email field. Returns true when a suggestion was shown (caller must not send).
-     The address the user has already been asked about is remembered so submitting again keeps it. */
-  var keptEmail = null;
-  function emailHintShown() {
-    var v = inputs.email.value.trim();
-    if (v === keptEmail || typeof window.trdSuggestEmail !== 'function') return false;
+  /* Typo advice for an email input. Returns true when a suggestion was shown (caller must not send).
+     The address the user has already been asked about is remembered in memo.kept, so submitting again keeps it.
+     onPick runs after the suggestion is applied; onShown after it is displayed. */
+  var formMemo = { kept: null };
+  function suggestInto(input, errEl, memo, onPick, onShown) {
+    var v = input.value.trim();
+    if (v === memo.kept || typeof window.trdSuggestEmail !== 'function') return false;
     var s;
     try { s = window.trdSuggestEmail(v); } catch (e) { return false; }
     if (!s || s === v) return false;
-    keptEmail = v;
+    memo.kept = v;
     var btn = el('button', { type: 'button', class: 'trd-suggest', text: s });
     btn.addEventListener('click', function () {
-      inputs.email.value = s;
-      setError('email', '');
-      inputs.email.focus();
+      input.value = s;
+      onPick();
+      input.focus();
     });
-    errs.email.textContent = '';
-    errs.email.classList.add('is-hint');
-    errs.email.appendChild(document.createTextNode('Did you mean '));
-    errs.email.appendChild(btn);
-    errs.email.appendChild(document.createTextNode('?'));
-    focusField('email', true);
+    errEl.textContent = '';
+    errEl.classList.add('is-hint');
+    errEl.appendChild(document.createTextNode('Did you mean '));
+    errEl.appendChild(btn);
+    errEl.appendChild(document.createTextNode('?'));
+    onShown();
     return true;
+  }
+
+  function emailHintShown() {
+    return suggestInto(inputs.email, errs.email, formMemo,
+      function () { setError('email', ''); },
+      function () { focusField('email', true); });
   }
 
   /* Every error is shown at once and the first invalid field gets focus. The typo hint is checked
@@ -414,14 +424,19 @@
     submitBtn.textContent = 'Submit';
   }
 
+  /* Fills `target` with `lead`, then " contact us at " and the fallback contact: the generic failure wording of both steps. */
+  function showContactError(target, lead) {
+    target.textContent = '';
+    target.appendChild(document.createTextNode(lead + ' contact us at '));
+    var c = CFG.FALLBACK_CONTACT || '';
+    if (/@/.test(c)) target.appendChild(el('a', { href: 'mailto:' + c, text: c }));
+    else target.appendChild(document.createTextNode(c));
+    target.appendChild(document.createTextNode('.'));
+  }
+
   function fail() {
     resetSubmit();
-    submitErr.textContent = '';
-    submitErr.appendChild(document.createTextNode('Sorry, something went wrong and your details were not sent. Please try again, or contact us at '));
-    var c = CFG.FALLBACK_CONTACT || '';
-    if (/@/.test(c)) submitErr.appendChild(el('a', { href: 'mailto:' + c, text: c }));
-    else submitErr.appendChild(document.createTextNode(c));
-    submitErr.appendChild(document.createTextNode('.'));
+    showContactError(submitErr, 'Sorry, something went wrong and your details were not sent. Please try again, or');
     if (tsWidgetId !== null && window.turnstile) {
       try { window.turnstile.reset(tsWidgetId); tsToken = ''; } catch (e) { /* ignore */ }
     }
@@ -451,8 +466,8 @@
       });
     }).then(function (res) {
       if (res.ok) {
-        /* The lead is saved at this point: a body that cannot be read only costs the booking prefill. */
-        return res.json().then(function (d) { return d && d.leadId; }, function () { return ''; }).then(success);
+        /* The lead is saved at this point: a body that cannot be read only costs the booking prefill and the email check. */
+        return res.json().then(function (d) { return d || {}; }, function () { return {}; }).then(function (d) { success(d.leadId, d.emailOk, d.fixToken); });
       }
       if (res.status === 400) {
         return res.json().then(function (data) {
@@ -494,7 +509,7 @@
 
   /* With CAL_LINK set (and js/booking.js loaded) the card turns into the Cal.com calendar, prefilled and tagged
      with the saved lead's id. Returns false when that is not possible so the caller shows the thank-you. */
-  function showBooking(leadId) {
+  function showBooking(leadId, email) {
     if (!CFG.CAL_LINK || !window.trdBooking || typeof window.trdBooking.mount !== 'function') return false;
     var title = el('p', { class: 'trd-booking-title', tabindex: '-1', text: 'Pick a time for your call' });
     var host = el('div', { class: 'trd-booking-host' });
@@ -506,7 +521,7 @@
     try {
       started = window.trdBooking.mount(host, {
         name: inputs.fullName.value.trim(),
-        email: inputs.email.value.trim(),
+        email: email,
         phone: normalisePhone(inputs.dial.value, inputs.phone.value),
         company: inputs.company.value.trim(),
         leadId: leadId ? String(leadId) : ''
@@ -546,13 +561,142 @@
     return true;
   }
 
-  function success(leadId) {
+  /* The instruction paragraph of the email step. The domain is typed by the visitor, so it goes in as a text node
+     (never markup). Exposed as window.trdForm.fixTitle for tests/form-client.test.ts. */
+  function fixTitle(domain, id) {
+    var title = el('p', { class: 'trd-fix-title', tabindex: '-1' });
+    if (id) title.id = id;
+    title.appendChild(document.createTextNode("We've saved your details. We couldn't find a mail server for "));
+    var strong = document.createElement('strong');
+    strong.appendChild(document.createTextNode(domain));
+    title.appendChild(strong);
+    title.appendChild(document.createTextNode(", so your booking confirmation wouldn't reach you. Please check your email:"));
+    return title;
+  }
+  window.trdForm = { fixTitle: fixTitle };
+
+  var FIX_TIMEOUT_MS = 15000;
+
+  /* The email domain has no mail server: Cal would refuse the booking. The lead is already saved, so the card
+     asks for a corrected address (updating the same row; fixToken is the credential /api/lead issued for it)
+     before the calendar, or lets the visitor skip it, even while a correction is in flight. */
+  function showEmailFix(leadId, fixToken) {
+    var domain = inputs.email.value.trim().split('@').pop();
+    var id = 'trd-fix-' + Math.random().toString(36).slice(2, 7);
+    var title = fixTitle(domain, id + '-title');
+    var input = el('input', { class: 'trd-input', id: id + '-email', type: 'email', name: 'fix_email', autocomplete: 'email', inputmode: 'email', 'aria-label': 'Email', 'aria-describedby': id + '-title ' + id + '-err' });
+    input.value = inputs.email.value.trim();
+    var err = el('div', { class: 'trd-error', id: id + '-err', 'aria-live': 'polite' });
+    var formErr = el('div', { class: 'trd-submit-error', role: 'alert' });
+    var go = el('button', { type: 'submit', class: 'trd-btn', text: 'Continue to booking' });
+    var skip = el('button', { type: 'button', class: 'trd-suggest trd-skip', text: 'Skip \u2014 just call me' });
+    var step = el('form', { class: 'trd-fix', novalidate: '', autocomplete: 'on' }, [
+      title, el('div', { class: 'trd-field' }, [input, err]), formErr,
+      el('div', { class: 'trd-actions' }, [skip, el('span', { class: 'trd-spacer' }), go])
+    ]);
+    var memo = { kept: null };
+    /* The request in flight, if any; `gone` is set once the step has been left, so a late answer does nothing. */
+    var pending = null, gone = false;
+
+    function setFixError(msg) {
+      err.textContent = msg;
+      err.classList.remove('is-hint');
+      input.classList.toggle('is-invalid', !!msg);
+      if (msg) input.setAttribute('aria-invalid', 'true'); else input.removeAttribute('aria-invalid');
+    }
+    function idle() {
+      pending = null;
+      go.disabled = false;
+      go.textContent = 'Continue to booking';
+    }
+    function leave() {
+      gone = true;
+      if (pending) { try { pending.abort(); } catch (e) { /* the step is closing either way */ } }
+      if (step.parentNode) step.parentNode.removeChild(step);
+      overlay.scrollTop = 0;
+    }
+
+    input.addEventListener('input', function () { setFixError(''); formErr.textContent = ''; memo.kept = null; });
+    skip.addEventListener('click', function () {
+      leave();
+      showThanks();
+    });
+    step.addEventListener('submit', function (e) {
+      e.preventDefault();
+      if (pending || gone) return;
+      formErr.textContent = '';
+      var value = input.value.trim();
+      var msg = validate('email', value);
+      if (msg) { setFixError(msg); input.focus(); return; }
+      if (suggestInto(input, err, memo, function () { setFixError(''); }, function () { input.focus(); })) return;
+      var ctl = typeof window.AbortController === 'function' ? new window.AbortController() : null;
+      pending = { abort: function () { if (ctl) ctl.abort(); } };
+      var timer = ctl ? setTimeout(function () { try { ctl.abort(); } catch (e) { /* ignore */ } }, FIX_TIMEOUT_MS) : null;
+      go.disabled = true;
+      go.textContent = '';
+      go.appendChild(el('span', { class: 'trd-spinner', 'aria-hidden': 'true' }));
+      go.appendChild(document.createTextNode('Checking'));
+      fetch(EMAIL_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leadId: leadId, email: value, fixToken: fixToken }),
+        credentials: 'same-origin',
+        signal: ctl ? ctl.signal : undefined
+      }).then(function (res) {
+        if (gone) return;
+        if (res.ok) {
+          return res.json().then(function (d) { return d || {}; }, function () { return {}; }).then(function (d) {
+            if (gone) return;
+            if (d.emailOk === false) {
+              idle();
+              setFixError("We still can't find a mail server for " + value.split('@').pop() + '. Please check the address.');
+              input.focus();
+              return;
+            }
+            inputs.email.value = value;
+            leave();
+            if (!showBooking(leadId, value)) showThanks();
+          });
+        }
+        if (res.status === 400) {
+          return res.json().then(function (d) { return d && d.fields && d.fields.email && d.fields.email[0]; }, function () { return ''; }).then(function (m) {
+            if (gone) return;
+            if (!m) throw new Error('HTTP 400');
+            idle();
+            setFixError(String(m));
+            input.focus();
+          });
+        }
+        if (res.status === 409) {
+          /* The row no longer accepts a change here (for example it was corrected from another tab). */
+          idle();
+          showContactError(formErr, "We can't update your email here. Please skip this step, or");
+          return;
+        }
+        throw new Error('HTTP ' + res.status);
+      }).catch(function () {
+        if (gone) return;
+        idle();
+        showContactError(formErr, "Sorry, something went wrong and we couldn't check your email. Please try again, skip this step, or");
+      }).then(function () {
+        if (timer) clearTimeout(timer);
+      });
+    });
+
+    card.appendChild(step);
+    doneEl = title;
+    title.focus();
+  }
+
+  function success(leadId, emailOk, fixToken) {
     sent = true;
     busy = false;
     card.removeChild(form);
-    /* The form was long: the next state (calendar or thank-you) starts at the top of the overlay. */
+    /* The form was long: the next state (email fix, calendar or thank-you) starts at the top of the overlay. */
     overlay.scrollTop = 0;
-    if (!showBooking(leadId)) showThanks();
+    /* Without a fixToken (the server has no CRON_SECRET) the row cannot be corrected from here, and Cal would refuse the address, so the thank-you stands in for both. */
+    if (emailOk === false) { if (fixToken) showEmailFix(leadId, fixToken); else showThanks(); }
+    else if (!showBooking(leadId, inputs.email.value.trim())) showThanks();
     try { if (window.track && window.track.lead) window.track.lead(); } catch (e) { /* tracking must never break the flow */ }
   }
 

@@ -12,6 +12,12 @@ vi.mock('google-auth-library', async () => {
   return mockJwt(actual);
 });
 
+// The MX lookup has its own tests (tests/email-domain.test.ts); the handler here is given a verdict.
+vi.mock('../lib/email-domain.js', async (importActual) => ({
+  ...(await importActual<typeof import('../lib/email-domain.js')>()),
+  checkEmailDomain: async () => 'OK',
+}));
+
 let errors: ReturnType<typeof vi.spyOn>;
 let logs: ReturnType<typeof vi.spyOn>;
 
@@ -263,7 +269,7 @@ describe('POST /api/lead logs a Lead submitted event', () => {
     const out = await post({ ...validBody, utmSource: 'google', utmMedium: 'cpc' });
     expect(out.status).toBe(200);
     const { leadId } = out.body as { leadId: string };
-    expect(fake.sheet.at(-1)).toHaveLength(40);
+    expect(fake.sheet.at(-1)).toHaveLength(42);
     expect(fake.eventRows).toHaveLength(1);
     const [at, id, event, from, to, callTime, uid, source, detail] = fake.eventRows[0]!;
     expect(at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);

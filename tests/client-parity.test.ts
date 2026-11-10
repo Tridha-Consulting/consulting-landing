@@ -44,6 +44,19 @@ function clientFiles(dir: string): string[] {
   return out;
 }
 
+describe('js/form.js trunk-zero and India rules match lib/schema.ts', () => {
+  it('both drop every leading zero (Italy keeps them) and require a 6-9 first digit for +91', () => {
+    expect(formJs).toContain(String.raw`return dial === '39' ? n : n.replace(/^0+/, '');`);
+    expect(formJs).toContain(String.raw`dial === '91' && !/^[6-9]\d{9}$/.test(national)`);
+    const schemaSource = readFileSync(join(fileURLToPath(new URL('..', import.meta.url)), 'lib/schema.ts'), 'utf8');
+    expect(schemaSource).toContain(String.raw`national.replace(/^0+/, '')`);
+    expect(schemaSource).toContain(String.raw`/^\+91[6-9]\d{9}$/`);
+    // The same inputs end up the same way on the server.
+    expect(leadSchema.parse({ ...validBody, phone: '+91009000000001' }).phone).toBe('+919000000001');
+    expect(leadSchema.safeParse({ ...validBody, phone: '+915876543210' }).success).toBe(false);
+  });
+});
+
 describe('js/form.js phone rule is a subset of the server rule, not a mirror', () => {
   // The client only knows the India shape (10 digits, first 6-9); libphonenumber-js is not bundled.
   // The server is the backstop, so a client-accepted number may still get a server 400 on the field.

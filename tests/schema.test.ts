@@ -192,12 +192,42 @@ describe('normalisePhone trunk zero', () => {
     ['+971 0501234567', '+971501234567'],
     ['+3906 1234 5678', '+390612345678'], // Italy keeps the 0
     ['+919812345678', '+919812345678'],
-    ['+9100812345678', '+910812345678'], // only one 0 is stripped
+    ['+9100812345678', '+91812345678'], // every leading 0 is stripped, as the client does
+    ['+91009000000001', '+919000000001'],
+    ['+44 0079 11123456', '+447911123456'],
+    ['+3900612345678', '+3900612345678'], // Italy keeps them all
   ])('%s -> %s', (raw, expected) => {
     expect(normalisePhone(raw)).toBe(expected);
   });
 
   it('is applied by the schema', () => {
     expect(leadSchema.parse({ ...validBody, phone: '+44 07911 123456' }).phone).toBe('+447911123456');
+  });
+});
+
+describe('Indian numbers: the server applies the client rule (10 digits, first 6-9)', () => {
+  const phoneOk = (phone: string) => leadSchema.safeParse({ ...validBody, phone }).success;
+
+  it('stores +91009000000001 as +919000000001, never with a zero left in front', () => {
+    expect(leadSchema.parse({ ...validBody, phone: '+91009000000001' }).phone).toBe('+919000000001');
+  });
+
+  it('rejects +915876543210, which the client rejects too (first digit 5)', () => {
+    const r = leadSchema.safeParse({ ...validBody, phone: '+915876543210' });
+    expect(r.success).toBe(false);
+    expect(r.error?.issues.map((i) => i.path[0])).toEqual(['phone']);
+  });
+
+  it.each(['+919876543210', '+917045152625', '+916000000000', '+91 098765 43210', '+9100 9876543210'])('accepts %s', (n) => {
+    expect(phoneOk(n)).toBe(true);
+  });
+
+  it.each(['+915876543210', '+912932838188', '+91987654321', '+9198765432101', '+91000000000', '+910'])('rejects %s', (n) => {
+    expect(phoneOk(n)).toBe(false);
+  });
+
+  it('does not apply the India rule to other countries', () => {
+    expect(phoneOk('+442071838750')).toBe(true);
+    expect(phoneOk('+14155552671')).toBe(true);
   });
 });

@@ -218,15 +218,25 @@ body { overflow-x: hidden; background: #fff; }
   }
   .trd-lp .sticky-mobile-cta .btn { width: 100%; }
   @media (max-width: 760px) {
-    /* Bar height = top padding + bottom padding + top border + button, from the
-       same four numbers the bar is built from. scroll-padding-bottom keeps a
-       focused or anchor-scrolled element above the bar rather than under it. */
+    /* --sticky-cta-h adds up the bar's top and bottom padding, its 1px top
+       border and the button's min-height. The button can grow past that
+       min-height (a fallback font with a taller line, enlarged text), and
+       the bar then grows past --sticky-cta-h; the scroll padding does not
+       follow it. --sticky-cta-clear is the room kept above the bar: its
+       upward shadow (0 -8px 24px -12px) reaches 8px above its top edge,
+       which also clears a focus ring drawn outside the focused element. */
     :root {
       --sticky-cta-pad: 12px;
       --sticky-cta-btn-h: 50px;
       --sticky-cta-h: calc(var(--sticky-cta-pad) * 2 + 1px + var(--sticky-cta-btn-h));
+      --sticky-cta-clear: 8px;
     }
-    html { scroll-padding-bottom: calc(var(--sticky-cta-h) + env(safe-area-inset-bottom)); }
+    /* Keeps a focused or anchor-scrolled element above the bar. :has() limits
+       it to pages that render the bar; book.html loads this stylesheet
+       without one and keeps the default. */
+    html:has(.trd-lp .sticky-mobile-cta) {
+      scroll-padding-bottom: calc(var(--sticky-cta-h) + var(--sticky-cta-clear) + env(safe-area-inset-bottom));
+    }
     .trd-lp .sticky-mobile-cta { display: block; padding: var(--sticky-cta-pad) 16px calc(var(--sticky-cta-pad) + env(safe-area-inset-bottom)); }
     .trd-lp .sticky-mobile-cta .btn { box-sizing: border-box; min-height: var(--sticky-cta-btn-h); }
     .trd-lp .lp-footer { padding-bottom: calc(32px + 64px + env(safe-area-inset-bottom)); }

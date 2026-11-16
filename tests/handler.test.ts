@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as lead from '../api/lead.js';
 import { columnIndex, toRow } from '../lib/columns.js';
 import { fixTokenFor } from '../lib/fix-token.js';
+import { resetLeadRateLimit } from '../lib/rate-limit.js';
 import { BOTTLENECK_OPTIONS } from '../lib/schema.js';
 import { makeRequest, readJsonResponse, validBody } from './helpers.js';
 
@@ -25,6 +26,7 @@ let errSpy: ReturnType<typeof vi.spyOn>;
 let logSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
+  resetLeadRateLimit();
   write.mockReset();
   write.mockResolvedValue(undefined);
   logEvents.mockReset();
@@ -333,6 +335,63 @@ describe('Turnstile', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ success: true }) }));
     expect((await call('POST', { ...validBody, turnstileToken: 'good' })).statusCode).toBe(200);
     expect(write).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('rate limiting', () => {
+  const ipA = { 'x-forwarded-for': '203.0.113.9' };
+
+  it('the 6th request from one ip -> 429 rate_limited with Retry-After, no write, full lead logged', async () => {
+    for (let i = 0; i < 5; i++) expect((await call('POST', validBody, ipA)).statusCode).toBe(200);
+    expect(write).toHaveBeenCalledTimes(5);
+    const out = await call('POST', { ...validBody, turnstileToken: 'tok' }, ipA);
+    expect(out.statusCode).toBe(429);
+    expect(out.body).toEqual({ ok: false, error: 'rate_limited' });
+    expect(Number(out.headers.get('Retry-After'))).toBeGreaterThan(0);
+    expect(Number(out.headers.get('Retry-After'))).toBeLessThanOrEqual(600);
+    expect(write).toHaveBeenCalledTimes(5);
+    const ev = loggedEvent(errSpy, 'LEAD_RATE_LIMITED')!;
+    expect(ev.ip).toBe('203.0.113.9');
+    expect(ev.lead).toMatchObject(validBody);
+    expect(ev.lead).not.toHaveProperty('turnstileToken');
+  });
+
+  it('a different ip is unaffected, and so is a request with no ip', async () => {
+    for (let i = 0; i < 6; i++) await call('POST', validBody, ipA);
+    expect((await call('POST', validBody, { 'x-forwarded-for': '198.51.100.7' })).statusCode).toBe(200);
+    expect((await call('POST', validBody)).statusCode).toBe(200);
+  });
+
+  it('only the first x-forwarded-for hop is the key', async () => {
+    for (let i = 0; i < 5; i++) await call('POST', validBody, { 'x-forwarded-for': `203.0.113.9, 10.0.0.${i}` });
+    expect((await call('POST', validBody, { 'x-forwarded-for': '203.0.113.9, 10.0.0.99' })).statusCode).toBe(429);
+  });
+
+  it('LEAD_RATE_LIMIT lowers the limit', async () => {
+    vi.stubEnv('LEAD_RATE_LIMIT', '1');
+    expect((await call('POST', validBody, ipA)).statusCode).toBe(200);
+    expect((await call('POST', validBody, ipA)).statusCode).toBe(429);
+  });
+
+  it('a honeypot request is answered before the limiter and does not consume budget', async () => {
+    for (let i = 0; i < 20; i++) expect((await call('POST', { ...validBody, company_website: 'spam' }, ipA)).statusCode).toBe(200);
+    for (let i = 0; i < 5; i++) expect((await call('POST', validBody, ipA)).statusCode).toBe(200);
+    expect((await call('POST', validBody, ipA)).statusCode).toBe(429);
+  });
+
+  it('runs before Turnstile: a limited request makes no siteverify call', async () => {
+    vi.stubEnv('TURNSTILE_SECRET_KEY', 'secret');
+    const f = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ success: true }) });
+    vi.stubGlobal('fetch', f);
+    for (let i = 0; i < 5; i++) expect((await call('POST', { ...validBody, turnstileToken: 'good' }, ipA)).statusCode).toBe(200);
+    expect(f).toHaveBeenCalledTimes(5);
+    expect((await call('POST', { ...validBody, turnstileToken: 'good' }, ipA)).statusCode).toBe(429);
+    expect(f).toHaveBeenCalledTimes(5);
+  });
+
+  it('requests that fail validation still count (attempts, not just accepted leads)', async () => {
+    for (let i = 0; i < 5; i++) expect((await call('POST', { ...validBody, budget: undefined }, ipA)).statusCode).toBe(400);
+    expect((await call('POST', validBody, ipA)).statusCode).toBe(429);
   });
 });
 

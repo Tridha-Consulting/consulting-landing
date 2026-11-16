@@ -4,6 +4,7 @@ import { EMAIL_CHECK, checkEmailDomain } from '../lib/email-domain.js';
 import { EVENT_LOG_DEADLINE_MS, logEvents } from '../lib/event-log.js';
 import { fixTokenFor } from '../lib/fix-token.js';
 import { BodyError, clientIp, json, methodNotAllowed, readJsonObject } from '../lib/http.js';
+import { checkLeadRate } from '../lib/rate-limit.js';
 import { leadSchema } from '../lib/schema.js';
 import { STATUS, type LeadRow } from '../lib/columns.js';
 import type { LeadSink } from '../lib/sinks/index.js';
@@ -53,6 +54,14 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const ip = clientIp(request);
+
+  // Before Turnstile, so a flood does not spend a siteverify call per request. A honeypot hit returned above
+  // and costs the sender nothing here.
+  const rate = checkLeadRate(ip);
+  if (!rate.allowed) {
+    console.error(JSON.stringify({ event: 'LEAD_RATE_LIMITED', ip, lead: submittedLead(body) }));
+    return json(429, { ok: false, error: 'rate_limited' }, { 'Retry-After': String(rate.retryAfterSec) });
+  }
 
   const turnstileSecret = process.env.TURNSTILE_SECRET_KEY;
   if (turnstileSecret) {

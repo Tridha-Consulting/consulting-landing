@@ -37,6 +37,15 @@ npm run dev         # vercel dev: serves the page and /api/lead
 | `CAL_WEBHOOK_SECRET` | for `/api/cal-webhook` | the secret typed into the Cal.com webhook; without it the endpoint returns 500 |
 | `CALENDAR_ID`, `CALENDAR_CHANNEL_TOKEN`, `CRON_SECRET` | for the calendar sync | see "Google Calendar declines". `CRON_SECRET` also keys the `fixToken` of the email correction (see "Email check") |
 
+### Lead rate limit
+
+`/api/lead` accepts 5 submissions per client IP per 10 minutes (sliding window) and then answers `429 { "error": "rate_limited" }` with a `Retry-After` header; the dropped lead is logged in full as `LEAD_RATE_LIMITED`. The check runs after the honeypot and before the Turnstile call. It is kept in each serverless instance's memory (`lib/rate-limit.ts`), so it stops a burst from one source but is not a global quota across instances; Turnstile is the bot defence. A request with no client IP is not limited. `vercel dev` sets `x-real-ip` to the loopback address, so the limit applies locally too; set `LEAD_RATE_LIMIT=1000` in `.env.local` to lift it.
+
+| Var | Required | Notes |
+|---|---|---|
+| `LEAD_RATE_LIMIT` | no | submissions per IP per window; defaults to `5`. A non-positive or non-integer value is ignored |
+| `LEAD_RATE_WINDOW_SEC` | no | window length in seconds; defaults to `600`. A non-positive or non-integer value is ignored |
+
 ## Google Sheet setup
 
 1. Create a Google Cloud project at console.cloud.google.com (any name).

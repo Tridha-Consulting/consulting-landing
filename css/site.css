@@ -218,7 +218,17 @@ body { overflow-x: hidden; background: #fff; }
   }
   .trd-lp .sticky-mobile-cta .btn { width: 100%; }
   @media (max-width: 760px) {
-    .trd-lp .sticky-mobile-cta { display: block; }
+    /* Bar height = top padding + bottom padding + top border + button, from the
+       same four numbers the bar is built from. scroll-padding-bottom keeps a
+       focused or anchor-scrolled element above the bar rather than under it. */
+    :root {
+      --sticky-cta-pad: 12px;
+      --sticky-cta-btn-h: 50px;
+      --sticky-cta-h: calc(var(--sticky-cta-pad) * 2 + 1px + var(--sticky-cta-btn-h));
+    }
+    html { scroll-padding-bottom: calc(var(--sticky-cta-h) + env(safe-area-inset-bottom)); }
+    .trd-lp .sticky-mobile-cta { display: block; padding: var(--sticky-cta-pad) 16px calc(var(--sticky-cta-pad) + env(safe-area-inset-bottom)); }
+    .trd-lp .sticky-mobile-cta .btn { box-sizing: border-box; min-height: var(--sticky-cta-btn-h); }
     .trd-lp .lp-footer { padding-bottom: calc(32px + 64px + env(safe-area-inset-bottom)); }
   }
 

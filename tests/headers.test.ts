@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { describe, expect, it } from 'vitest';
 
@@ -9,12 +9,36 @@ type Rule = { source: string; headers: { key: string; value: string }[] };
 const rules = (JSON.parse(read('vercel.json')) as { headers: Rule[] }).headers;
 const PAGES = ['index.html', 'book.html'];
 
-/* The sources in vercel.json are literal paths, optionally ending in (.*). Any other syntax fails here until this is taught it. */
-function matches(source: string, path: string): boolean {
-  const m = /^([\w/.-]*)(\(\.\*\))?$/.exec(source);
-  if (!m) throw new Error(`matches() cannot read the vercel.json source ${source}`);
-  return m[2] ? path.startsWith(m[1]!) : path === m[1];
+/* Vercel compiles a source with path-to-regexp 6 ({ strict, sensitive, delimiter: '/' } in @vercel/routing-utils), so it
+   matches the whole path, case-sensitively. The sources in vercel.json are literal path characters and (…) groups holding a
+   regular expression, which is all this reads: a :name parameter, a modifier or an unbalanced group fails here until this is
+   taught it. */
+function sourceRegex(source: string): RegExp {
+  let out = '';
+  for (let i = 0; i < source.length;) {
+    if (source[i] === '(') {
+      let depth = 0;
+      let j = i;
+      do {
+        if (source[j] === '\\') j++;
+        else if (source[j] === '(') depth++;
+        else if (source[j] === ')') depth--;
+        j++;
+      } while (depth > 0 && j < source.length);
+      if (depth > 0) throw new Error(`unbalanced group in the vercel.json source ${source}`);
+      out += source.slice(i, j);
+      i = j;
+    } else if (/[\w/.-]/.test(source[i]!)) {
+      out += source[i] === '.' ? '\\.' : source[i];
+      i++;
+    } else {
+      throw new Error(`sourceRegex() cannot read ${source[i]} in the vercel.json source ${source}`);
+    }
+  }
+  return new RegExp(`^${out}$`);
 }
+
+const matches = (source: string, path: string): boolean => sourceRegex(source).test(path);
 
 /* The one value a header takes on a path. Two matching rules setting the same key fail, so rule order never decides a header. */
 function header(path: string, key: string): string {
@@ -321,9 +345,37 @@ describe('Permissions-Policy', () => {
   });
 });
 
+/* A file that keeps its name across edits must not be cached as immutable: a browser that fetched the old hero.mp4 would keep it
+   for a year with no way to make it ask again. Only a name carrying a content hash or version (name.<8+ hex>.ext,
+   name.v<digits>.ext) changes whenever the file does, so only that name is safe to cache for good. */
+const SHORT = 'public, max-age=3600';
+const IMMUTABLE = 'public, max-age=31536000, immutable';
+
 describe('Cache-Control', () => {
-  it.each(['/assets/hero.mp4', '/assets/hero-poster.webp', '/assets/favicon.svg'])('caches %s for a year as immutable', (path) => {
-    expect(header(path, 'Cache-Control')).toBe('public, max-age=31536000, immutable');
+  it.each(['hero.mp4', 'hero-poster.webp', 'hero-poster.jpg', 'favicon.svg', 'og.jpg', 'apple-touch-icon.png'])(
+    'caches /assets/%s for an hour, since its name stays the same when it changes',
+    (name) => {
+      expect(header(`/assets/${name}`, 'Cache-Control')).toBe(SHORT);
+    },
+  );
+
+  it('gives no file in assets/ today the immutable cache, since none carries a hash or version in its name', () => {
+    const names = readdirSync(new URL('../assets/', import.meta.url));
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of names) expect(header(`/assets/${name}`, 'Cache-Control'), name).toBe(SHORT);
+  });
+
+  it.each(['hero.3f9a1c2b.mp4', 'og.0123456789abcdef.jpg', 'hero-poster.v2.webp', 'favicon.v10.svg'])(
+    'caches the hashed or versioned /assets/%s for a year as immutable',
+    (name) => {
+      expect(header(`/assets/${name}`, 'Cache-Control')).toBe(IMMUTABLE);
+    },
+  );
+
+  it.each([
+    'hero.3f9a1c2.mp4', 'hero.3F9A1C2B.mp4', 'hero.v.mp4', 'hero.3f9a1c2b', '.3f9a1c2b.mp4', 'sub/hero.3f9a1c2b.mp4', 'hero.3f9a1c2b.mp4/x',
+  ])('keeps the short cache on /assets/%s, which is not a hashed name', (name) => {
+    expect(header(`/assets/${name}`, 'Cache-Control')).toBe(SHORT);
   });
 
   it.each(['/css/site.css', '/js/form.js'])('still makes browsers revalidate %s', (path) => {

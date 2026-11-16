@@ -20,7 +20,7 @@
     company: { min: 1, max: 120 },
     website: { min: 1, max: 200 },
     email: { max: 254, pattern: /^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/ },
-    phone: { minDigits: 6, maxDigits: 15 },
+    phone: { minDigits: 6, maxDigits: 15, typedCodeMinDigits: 8 }, /* typedCodeMinDigits: browser only, see normalisePhone */
     attribution: { max: 500 }
   };
 
@@ -128,13 +128,55 @@
   }
 
   /* ---------- validation ---------- */
-  function digitsOnly(s) { return String(s).replace(/\D/g, ''); }
-
   /* Every leading trunk 0 is dropped for every country except Italy (+39), whose numbers keep it.
      Counterpart: normalisePhone in lib/schema.ts. */
-  function nationalDigits(dial, value) {
-    var n = digitsOnly(value);
-    return dial === '39' ? n : n.replace(/^0+/, '');
+  function nationalDigits(dial, digits) {
+    return dial === '39' ? digits : digits.replace(/^0+/, '');
+  }
+
+  /* The listed country code that an international number (its digits after "+" or "00") starts with,
+     or ''. The codes are prefix-free, so at most one matches. */
+  function typedCountryCode(digits) {
+    var cc = '';
+    COUNTRIES.forEach(function (c) { if (c[1].length > cc.length && digits.indexOf(c[1]) === 0) cc = c[1]; });
+    return cc;
+  }
+
+  /* India: a 10-digit mobile starting 6-9. The server applies the same rule on top of libphonenumber,
+     so the browser never refuses an Indian number the server would take. */
+  function indianMobile(national) { return /^[6-9]\d{9}$/.test(national) ? '+91' + national : ''; }
+
+  /* Invisible format characters a number copied from a chat, a contact card or a right-to-left page can
+     carry: soft hyphen, zero-width space and joiners, direction marks, embeddings and isolates, word joiner.
+     \s already covers the byte-order mark. Listed by range, not \p{Cf}, so the script parses without the u flag. */
+  var INVISIBLE = /[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f]/g;
+
+  /* The number to send, "+<country code><number>", or '' when the input cannot be a phone number.
+     Invisible characters, spaces, dashes, dots and parentheses are dropped; any other character but a
+     leading "+" is invalid. A leading "+", or "00" (the international prefix), brings its own country
+     code, which wins over the dropdown: +91 is checked as India, another listed code has its trunk 0
+     dropped, an unlisted code is sent as typed, and either needs 8 to 15 digits with the code. "00" is
+     read after the separators are dropped, so "0 0" is the prefix too, and "00" before another 0 is not
+     the prefix: those zeros are trunk zeros. Without a prefix the dropdown's code applies, and India also
+     takes the number typed with 91 in front (12 digits). */
+  function normalisePhone(dial, value) {
+    var s = String(value == null ? '' : value).replace(INVISIBLE, '').replace(/[\s\-\u2010-\u2015\u2212().]/g, '');
+    var intl = s.charAt(0) === '+' ? s.slice(1) : /^00[1-9]/.test(s) ? s.slice(2) : null;
+    if (intl !== null) {
+      if (!/^[1-9]\d*$/.test(intl)) return '';
+      var cc = typedCountryCode(intl);
+      if (cc === '91') return indianMobile(nationalDigits(cc, intl.slice(cc.length)));
+      var full = cc ? cc + nationalDigits(cc, intl.slice(cc.length)) : intl;
+      return full.length >= RULES.phone.typedCodeMinDigits && full.length <= RULES.phone.maxDigits ? '+' + full : '';
+    }
+    if (!/^\d+$/.test(s)) return '';
+    var national = nationalDigits(dial, s);
+    if (dial === '91') {
+      if (national.length === 12 && national.indexOf('91') === 0) national = national.slice(2);
+      return indianMobile(national);
+    }
+    var total = (dial + national).length;
+    return total >= RULES.phone.minDigits && total <= RULES.phone.maxDigits && national.length >= 4 ? '+' + dial + national : '';
   }
 
   function validate(field, value, dial) {
@@ -155,19 +197,11 @@
       if (!v) return 'Please enter your email address.';
       if (v.length > RULES.email.max || !RULES.email.pattern.test(v)) return 'Please enter a valid email address.';
     } else if (field === 'phone') {
-      var national = nationalDigits(dial, v);
-      if (!national) return 'Please enter your phone number.';
-      /* India: cheap subset of the server's libphonenumber check (a 10-digit mobile starting 6-9). */
-      if (dial === '91' && !/^[6-9]\d{9}$/.test(national)) return 'Please enter a valid 10-digit mobile number.';
-      var total = (dial + national).length;
-      if (total < RULES.phone.minDigits || total > RULES.phone.maxDigits || national.length < 4) {
-        return 'Please enter a valid phone number.';
-      }
+      if (!v.replace(INVISIBLE, '').trim()) return 'Please enter your phone number.';
+      if (!normalisePhone(dial, v)) return 'Please enter a valid phone number.';
     }
     return '';
   }
-
-  function normalisePhone(dial, value) { return '+' + dial + nationalDigits(dial, value); }
 
   /* ---------- DOM helpers ---------- */
   function el(tag, attrs, children) {

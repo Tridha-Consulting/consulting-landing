@@ -5,6 +5,7 @@ import { JSDOM } from 'jsdom';
 import { describe, expect, it, vi } from 'vitest';
 import { classifyChannel } from '../lib/channel.js';
 import { leadSchema } from '../lib/schema.js';
+import { IN_MOBILE, phoneShape } from './helpers.js';
 
 /**
  * Executes the page's own js/form.js in jsdom (no remote URL is ever loaded) and drives the real
@@ -106,6 +107,13 @@ function fillValid(p: Page, form: HTMLFormElement, bottlenecks = [0, 2]) {
   choose(form, 'techTeam', 1);
   choose(form, 'timeline', 0);
   choose(form, 'decisionMaker', 0);
+}
+
+function chooseDial(p: Page, form: HTMLFormElement, dial: string) {
+  const sel = form.querySelector('select') as HTMLSelectElement;
+  sel.value = dial;
+  expect(sel.value, `+${dial} is offered`).toBe(dial);
+  sel.dispatchEvent(new p.window.Event('change', { bubbles: true }));
 }
 
 function submit(p: Page, form: HTMLFormElement) {
@@ -253,29 +261,97 @@ describe('js/form.js in jsdom', () => {
     expect(p.calls).toHaveLength(0);
   });
 
+  /* The phone rules through the real form: [dropdown, typed, posted]. Every posted lead also passes the server schema.
+     The Indian mobile is libphonenumber's example, typed in each shape (see phoneShape). */
+  const IN_STORED = `+91${IN_MOBILE}`;
   it.each([
-    ['2932838188', 'a landline-style number (starts with 2)'],
-    ['5876543210', 'starts with 5'],
-    ['98765', 'too short'],
-    ['98765432101', 'too long'],
-  ])('rejects the Indian number %s on the client (%s)', async (num) => {
+    ['91', phoneShape('##########'), IN_STORED, 'a plain 10-digit mobile'],
+    ['91', phoneShape('0##### #####'), IN_STORED, 'the trunk 0 dropped'],
+    ['91', phoneShape('91##########'), IN_STORED, '91 in front, no +'],
+    ['91', phoneShape('+91 ##### #####'), IN_STORED, '+91 with spaces'],
+    ['91', phoneShape('+91-#####-#####'), IN_STORED, '+91 with dashes'],
+    ['91', phoneShape('(+91) ##### #####'), IN_STORED, '+91 in parentheses'],
+    ['91', phoneShape('0091 ##########'), IN_STORED, '00, the international prefix'],
+    ['91', phoneShape('#####.#####'), IN_STORED, 'dots'],
+    ['91', phoneShape('‪##### #####‬'), IN_STORED, 'pasted from a phone, wrapped in invisible direction marks'],
+    ['91', phoneShape('‪+91 ##### #####‬'), IN_STORED, '+91, pasted from a phone'],
+    ['91', phoneShape('‎##########'), IN_STORED, 'a left-to-right mark in front'],
+    ['91', phoneShape('#####​#####'), IN_STORED, 'a zero-width space inside'],
+    ['91', phoneShape('##########', `6${IN_MOBILE.slice(1)}`), `+916${IN_MOBILE.slice(1)}`, 'a mobile starting 6'],
+    ['91', phoneShape('##########', `7${IN_MOBILE.slice(1)}`), `+917${IN_MOBILE.slice(1)}`, 'a mobile starting 7'],
+    ['91', phoneShape('##########', `9${IN_MOBILE.slice(1)}`), `+919${IN_MOBILE.slice(1)}`, 'a mobile starting 9'],
+    ['91', '+971 50 123 4567', '+971501234567', 'a typed UAE code wins over the India dropdown'],
+    ['91', '+44 7911 123456', '+447911123456', 'a typed UK code wins over the India dropdown'],
+    ['44', phoneShape('+91 ##### #####'), IN_STORED, 'a typed +91 wins over the UK dropdown'],
+    ['971', '050 123 4567', '+971501234567', 'the UAE dropdown, trunk 0 dropped'],
+    ['39', '06 1234 5678', '+390612345678', 'the Italy dropdown keeps the 0'],
+    ['91', '+39 06 1234 5678', '+390612345678', 'a typed Italy code keeps the 0'],
+  ])('dropdown +%s, typed %j: posts %s (%s)', async (dial, typed, posted) => {
     const p = await loadPage();
     const form = openForm(p);
     fillValid(p, form);
-    setText(p, form, 'phone', num);
-    submit(p, form);
-    expect(errorText(form, 'phone')).toBe('Please enter a valid 10-digit mobile number.');
-    expect(p.calls).toHaveLength(0);
-  });
-
-  it.each(['9876543210', '098765 43210', '7045152625', '6000000000'])('accepts the Indian number %s on the client', async (num) => {
-    const p = await loadPage();
-    const form = openForm(p);
-    fillValid(p, form);
-    setText(p, form, 'phone', num);
+    chooseDial(p, form, dial);
+    setText(p, form, 'phone', typed);
     submit(p, form);
     await vi.waitFor(() => expect(p.calls).toHaveLength(1));
     expect(errorText(form, 'phone')).toBe('');
+    const body = JSON.parse(p.calls[0]!.init.body);
+    expect(body.phone).toBe(posted);
+    const parsed = leadSchema.safeParse(body);
+    expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
+    expect(parsed.data?.phone).toBe(posted);
+  });
+
+  it.each([
+    ['91', '0000000000', 'Please enter a valid phone number.', 'only zeros'],
+    ['91', '12345', 'Please enter a valid phone number.', 'too short'],
+    ['91', '98765432101', 'Please enter a valid phone number.', 'too long'],
+    ['91', '5876543210', 'Please enter a valid phone number.', 'an Indian number starting 5'],
+    ['91', '2932838188', 'Please enter a valid phone number.', 'a landline-style Indian number'],
+    ['91', '+91 5876543210', 'Please enter a valid phone number.', '+91 and a number starting 5'],
+    ['91', 'abcdefghij', 'Please enter a valid phone number.', 'letters'],
+    ['91', '98765 abc 43210', 'Please enter a valid phone number.', 'letters among the digits'],
+    ['91', '---', 'Please enter a valid phone number.', 'separators only'],
+    ['44', '+44 7911', 'Please enter a valid phone number.', 'a typed code with under 8 digits'],
+    ['91', '', 'Please enter your phone number.', 'empty'],
+    ['91', '   ', 'Please enter your phone number.', 'spaces only'],
+    ['91', '‪ ‬', 'Please enter your phone number.', 'invisible characters only'],
+  ])('dropdown +%s, typed %j: refused with %j (%s)', async (dial, typed, message) => {
+    const p = await loadPage();
+    const form = openForm(p);
+    fillValid(p, form);
+    chooseDial(p, form, dial);
+    setText(p, form, 'phone', typed);
+    submit(p, form);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(p.calls).toHaveLength(0);
+    expect(errorText(form, 'phone')).toBe(message);
+    expect(form.querySelector('input[name="phone"]')!.getAttribute('aria-invalid')).toBe('true');
+  });
+
+  // Outside India the browser checks only the length; libphonenumber on the server refuses the rest, and
+  // its 400 names the phone field. The route answers with the server schema's own verdict and message.
+  it.each([
+    ['+44 7911 12345', '+44791112345', 'a UK mobile one digit short'],
+    ['00 98765 43210', '+9876543210', '"00" read as the international prefix (+98)'],
+  ])('typed %j posts %s, which only the server refuses; its message shows under the phone field (%s)', async (typed, posted) => {
+    const p = await loadPage('', '', undefined, (_url, body) => {
+      const r = leadSchema.safeParse(body);
+      if (r.success) return { status: 200, body: { ok: true, leadId: 'x' } };
+      const fields: Record<string, string[]> = {};
+      for (const issue of r.error.issues) (fields[String(issue.path[0] ?? '_')] ??= []).push(issue.message);
+      return { status: 400, body: { ok: false, error: 'validation_failed', fields } };
+    });
+    const form = openForm(p);
+    fillValid(p, form);
+    setText(p, form, 'phone', typed);
+    submit(p, form);
+    await vi.waitFor(() => expect(errorText(form, 'phone')).toBe('Enter a valid phone number'));
+    expect(JSON.parse(p.calls[0]!.init.body).phone).toBe(posted);
+    expect(p.calls).toHaveLength(1);
+    expect(p.document.querySelector('.trd-thanks')).toBeNull();
+    expect(form.querySelector('input[name="phone"]')).toBe(p.document.activeElement);
+    for (const k of FIELD_KEYS.filter((f) => f !== 'phone')) expect(errorText(form, k), k).toBe('');
   });
 
   it('shows the server phone message on the phone field and keeps the form usable', async () => {

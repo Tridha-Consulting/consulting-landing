@@ -1,6 +1,8 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getExampleNumber, type CountryCode } from 'libphonenumber-js/max';
+import mobileExamples from 'libphonenumber-js/mobile/examples';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import {
@@ -13,7 +15,7 @@ import {
   TIMELINE_OPTIONS,
   leadSchema,
 } from '../lib/schema.js';
-import { validBody } from './helpers.js';
+import { IN_MOBILE, phoneShape, validBody } from './helpers.js';
 
 const formJs = readFileSync(new URL('../js/form.js', import.meta.url), 'utf8');
 
@@ -44,26 +46,199 @@ function clientFiles(dir: string): string[] {
   return out;
 }
 
-describe('js/form.js trunk-zero and India rules match lib/schema.ts', () => {
-  it('both drop every leading zero (Italy keeps them) and require a 6-9 first digit for +91', () => {
-    expect(formJs).toContain(String.raw`return dial === '39' ? n : n.replace(/^0+/, '');`);
-    expect(formJs).toContain(String.raw`dial === '91' && !/^[6-9]\d{9}$/.test(national)`);
-    const schemaSource = readFileSync(join(fileURLToPath(new URL('..', import.meta.url)), 'lib/schema.ts'), 'utf8');
-    expect(schemaSource).toContain(String.raw`national.replace(/^0+/, '')`);
-    expect(schemaSource).toContain(String.raw`/^\+91[6-9]\d{9}$/`);
-    // The same inputs end up the same way on the server.
-    expect(leadSchema.parse({ ...validBody, phone: '+91009000000001' }).phone).toBe('+919000000001');
-    expect(leadSchema.safeParse({ ...validBody, phone: '+915876543210' }).success).toBe(false);
-  });
-});
+type ClientPhone = {
+  normalisePhone: (dial: string, value: string) => string;
+  validate: (field: string, value: string, dial: string) => string;
+};
 
-describe('js/form.js phone rule is a subset of the server rule, not a mirror', () => {
-  // The client only knows the India shape (10 digits, first 6-9); libphonenumber-js is not bundled.
-  // The server is the backstop, so a client-accepted number may still get a server 400 on the field.
-  it('every Indian number the client rule would accept has the shape the server expects', () => {
-    expect(formJs).toContain(String.raw`dial === '91' && !/^[6-9]\d{9}$/.test(national)`);
-    for (const n of ['9876543210', '7045152625', '6000000000', '9999999999', '8123456789']) {
-      expect(leadSchema.safeParse({ ...validBody, phone: `+91${n}` }).success, n).toBe(true);
+/** js/form.js's phone code (COUNTRIES, RULES and its validation section), evaluated. It is our own source, in a test. */
+function clientPhone(): ClientPhone {
+  const countries = formJs.match(/var COUNTRIES = \[[\s\S]*?\];/);
+  const rules = formJs.match(/var RULES = \{[\s\S]*?\n  \};/);
+  const section = formJs.match(/\/\* -{10} validation -{10} \*\/([\s\S]*?)\/\* -{10} DOM helpers -{10} \*\//);
+  if (!countries || !rules || !section) throw new Error('phone code not found in js/form.js');
+  return new Function(`${countries[0]}\n${rules[0]}\n${section[1]}\nreturn { normalisePhone: normalisePhone, validate: validate };`)() as ClientPhone;
+}
+
+const client = clientPhone();
+
+/** What the server stores for a phone value, or null when it answers 400 on the field. */
+function serverPhone(phone: string): string | null {
+  const r = leadSchema.safeParse({ ...validBody, phone });
+  return r.success ? r.data.phone : null;
+}
+
+/** Region per offered country code, for libphonenumber's example numbers. */
+const REGIONS: Record<string, CountryCode> = {
+  '91': 'IN', '1': 'US', '44': 'GB', '971': 'AE', '65': 'SG', '61': 'AU', '966': 'SA', '974': 'QA', '965': 'KW',
+  '973': 'BH', '968': 'OM', '49': 'DE', '33': 'FR', '31': 'NL', '41': 'CH', '39': 'IT', '34': 'ES', '353': 'IE',
+  '60': 'MY', '852': 'HK', '81': 'JP', '86': 'CN', '62': 'ID', '66': 'TH', '64': 'NZ', '27': 'ZA', '234': 'NG',
+  '254': 'KE', '880': 'BD', '94': 'LK', '977': 'NP', '92': 'PK',
+};
+
+function exampleMobile(dial: string) {
+  const n = getExampleNumber(REGIONS[dial]!, mobileExamples);
+  if (!n) throw new Error(`no example number for +${dial}`);
+  return n;
+}
+
+/** 10-digit national numbers with first digits 1-9, from a fixed seed so a failure reproduces. A first 0
+ * is left out: typed after a trunk 0 it makes "00", the international prefix, which another test covers. */
+function sampleNationals(count: number): string[] {
+  let x = 20261116;
+  const next = () => (x = (x * 1103515245 + 12345) % 2147483648);
+  const out: string[] = [];
+  for (let i = 0; i < count; i++) out.push(String(1 + (i % 9)) + String(next() % 1e9).padStart(9, '0'));
+  return out;
+}
+
+/** How the server stores IN_MOBILE. */
+const IN_STORED = `+91${IN_MOBILE}`;
+
+/** Left-to-right embedding and its pop: an Android or WhatsApp copy of a number wraps it in these, unseen. */
+const LRE = '‪';
+const PDF = '‬';
+
+/** The ways a visitor types, or pastes, one Indian number into the field. */
+function indianShapes(n: string): string[] {
+  const spaced = `${n.slice(0, 5)} ${n.slice(5)}`;
+  return [n, `0${n}`, `0${spaced}`, `91${n}`, `0091 ${n}`, `+91${n}`, `+91 ${spaced}`, `+91-${n.slice(0, 5)}-${n.slice(5)}`, `(+91) ${spaced}`, `+91 0${n}`,
+    `${LRE}${spaced}${PDF}`, `${LRE}+91 ${spaced}${PDF}`, `‎${n}`];
+}
+
+describe('js/form.js phone rules against lib/schema.ts, run', () => {
+  it('drops the same trunk zeros as the server (Italy keeps them)', () => {
+    expect(serverPhone(phoneShape('+9100##########'))).toBe(IN_STORED);
+    expect(client.normalisePhone('91', phoneShape('+9100##########'))).toBe(IN_STORED);
+    expect(client.normalisePhone('44', '+44 07400 123456')).toBe(serverPhone('+44 07400 123456'));
+    expect(client.normalisePhone('39', '06 1234 5678')).toBe('+390612345678');
+    expect(client.normalisePhone('91', '+39 06 1234 5678')).toBe('+390612345678');
+    expect(serverPhone('+39 06 1234 5678')).toBe('+390612345678');
+    // "00" before a third 0 is not the international prefix: all three are trunk zeros, as on the server.
+    expect(client.normalisePhone('91', phoneShape('000 ##### #####'))).toBe(IN_STORED);
+    expect(serverPhone(phoneShape('+91 000 ##### #####'))).toBe(IN_STORED);
+  });
+
+  it('India: every typed form of a number the server takes is taken and sent as the server stores it; the rest are refused on both sides', () => {
+    let taken = 0;
+    for (const n of sampleNationals(2000)) {
+      const stored = serverPhone(`+91${n}`);
+      // The browser's India rule is the server's own: 10 digits, first 6-9, and libphonenumber takes every such number.
+      expect(stored !== null, n).toBe(/^[6-9]\d{9}$/.test(n));
+      if (stored) taken++;
+      for (const dial of ['91', '44']) {
+        for (const typed of indianShapes(n)) {
+          // With another dropdown only the forms that carry the code (+91, 0091) are Indian.
+          if (dial !== '91' && !/^(\+|\(\+|00)/.test(typed.replace(/[‎‪‬]/g, ''))) continue;
+          expect(client.normalisePhone(dial, typed), `${dial} ${typed}`).toBe(stored ?? '');
+        }
+      }
+    }
+    expect(taken).toBeGreaterThan(700);
+  });
+
+  it('India: numbers of the wrong length or first digit are refused on both sides', () => {
+    for (const n of ['5876543210', '2932838188', '0000000000', '1234567890', '98765', '987654321', '98765432101', '915876543210']) {
+      expect(client.normalisePhone('91', n), n).toBe('');
+      expect(client.validate('phone', n, '91'), n).toBe('Please enter a valid phone number.');
+      expect(serverPhone(`+91${n}`), n).toBeNull();
+    }
+  });
+
+  it('a number typed with "+" or "00" and its country code is sent exactly as the server stores it, whatever the dropdown', () => {
+    const typed = [
+      ...DIAL_CODES.map((d) => exampleMobile(d).formatInternational()),
+      // Countries the dropdown does not list: their codes are sent as typed.
+      ...(['RU', 'TR', 'BR', 'KR', 'MX', 'EG', 'PH', 'VN'] as const).map((r) => getExampleNumber(r, mobileExamples)!.formatInternational()),
+      '+44 (0)7400 123456', '+1 212 555 0123',
+    ];
+    for (const t of typed) {
+      const stored = serverPhone(t);
+      expect(stored, t).not.toBeNull();
+      for (const dial of ['91', '1', '971', '39']) {
+        expect(client.normalisePhone(dial, t), `${dial} ${t}`).toBe(stored);
+        expect(client.normalisePhone(dial, t.replace('+', '00')), `${dial} ${t} with 00`).toBe(stored);
+      }
+    }
+  });
+
+  it('a number typed in national form with its country in the dropdown is sent as the server stores the same number', () => {
+    for (const dial of DIAL_CODES) {
+      const n = exampleMobile(dial);
+      expect(n.countryCallingCode, dial).toBe(dial);
+      expect(client.normalisePhone(dial, n.formatNational()), `${dial} ${n.formatNational()}`).toBe(serverPhone(n.number));
+      expect(serverPhone(n.number), n.number).toBe(n.number);
+    }
+  });
+
+  it('outside India the browser checks only the length, so libphonenumber on the server is the one to refuse a bad number', () => {
+    // A UK mobile one digit short passes the browser, typed with the code or with the UK in the dropdown.
+    expect(client.normalisePhone('91', '+44 7911 12345')).toBe('+44791112345');
+    expect(serverPhone('+44791112345')).toBeNull();
+    expect(client.normalisePhone('44', '7911 12345')).toBe('+44791112345');
+  });
+
+  it('"00" is the international prefix, so a trunk 0 typed twice before an Indian mobile is read as a foreign number', () => {
+    // The digits after "00" (spaces between the zeros or not) start the country code, whatever the dropdown.
+    // A mobile starting 91 reads as +91 and 8 digits, which the browser refuses.
+    expect(client.normalisePhone('91', '009195923342')).toBe('');
+    expect(client.validate('phone', '009195923342', '91')).toBe('Please enter a valid phone number.');
+    // Most others are sent and the server refuses them: +98 (Iran) is not listed, +92 (Pakistan) is.
+    const refused: [string, string][] = [['00 98765 43210', '+9876543210'], ['0 0 98765 43210', '+9876543210'], ['009212345678', '+9212345678']];
+    for (const [typed, sent] of refused) {
+      expect(client.normalisePhone('91', typed), typed).toBe(sent);
+      expect(serverPhone(sent), sent).toBeNull();
+    }
+    // A few make a valid foreign number, and the server stores it: +65 (Singapore), +960 (Maldives).
+    const stored: [string, string][] = [['006581234567', '+6581234567'], ['009607123456', '+9607123456']];
+    for (const [typed, sent] of stored) {
+      expect(client.normalisePhone('91', typed), typed).toBe(sent);
+      expect(serverPhone(sent), sent).toBe(sent);
+    }
+  });
+
+  it('drops spaces, dashes, dots and parentheses, pasted typographic ones included', () => {
+    const chars = { noBreakSpace: 0xa0, nonBreakingHyphen: 0x2011, enDash: 0x2013, emDash: 0x2014, minus: 0x2212 };
+    for (const [name, code] of Object.entries(chars)) {
+      const sep = String.fromCharCode(code);
+      expect(client.normalisePhone('91', phoneShape(`+91${sep}#####${sep}#####`)), name).toBe(IN_STORED);
+    }
+    expect(client.normalisePhone('91', phoneShape('(0) #####.#####'))).toBe(IN_STORED);
+    expect(client.normalisePhone('91', phoneShape('#####/#####'))).toBe('');
+  });
+
+  it('drops the invisible characters a pasted number carries, so a number that looks right is taken', () => {
+    const invisible = {
+      softHyphen: 0xad, arabicLetterMark: 0x61c, zeroWidthSpace: 0x200b, zeroWidthNonJoiner: 0x200c, zeroWidthJoiner: 0x200d,
+      leftToRightMark: 0x200e, rightToLeftMark: 0x200f, leftToRightEmbedding: 0x202a, rightToLeftEmbedding: 0x202b,
+      popDirectionalFormatting: 0x202c, leftToRightOverride: 0x202d, rightToLeftOverride: 0x202e, wordJoiner: 0x2060,
+      leftToRightIsolate: 0x2066, rightToLeftIsolate: 0x2067, firstStrongIsolate: 0x2068, popDirectionalIsolate: 0x2069, byteOrderMark: 0xfeff,
+    };
+    for (const [name, code] of Object.entries(invisible)) {
+      const c = String.fromCharCode(code);
+      const shapes: [string, string][] = [['91', `${c}#####${c}#####${c}`], ['91', `${c}+91 ##### #####${c}`], ['44', `${c}+91 ##### #####${c}`], ['91', `${c}0091 ##########`]];
+      for (const [dial, shape] of shapes) {
+        expect(client.normalisePhone(dial, phoneShape(shape)), `${name} ${dial} ${shape}`).toBe(IN_STORED);
+        expect(client.validate('phone', phoneShape(shape), dial), `${name} ${dial} ${shape}`).toBe('');
+      }
+      // Alone they leave the field as empty as it looks.
+      expect(client.validate('phone', `${c}${c}`, '91'), name).toBe('Please enter your phone number.');
+    }
+    expect(client.normalisePhone('91', `${LRE}+971 50 123 4567${PDF}`)).toBe('+971501234567');
+  });
+
+  it('a typed country code needs 8 to 15 digits with the code, and an empty field keeps its own message', () => {
+    expect(client.normalisePhone('91', '+44 7911 1')).toBe('');
+    expect(client.normalisePhone('91', '+44 7911 12')).toBe('+44791112');
+    expect(client.normalisePhone('91', '+7 123 456')).toBe('');
+    expect(client.normalisePhone('91', '+7 1234 567')).toBe('+71234567');
+    expect(client.normalisePhone('91', '+7 1234 5678 9012 34')).toBe('+712345678901234');
+    expect(client.normalisePhone('91', '+7 1234 5678 9012 345')).toBe('');
+    expect(client.normalisePhone('91', '+0 1234 5678')).toBe('');
+    expect(client.validate('phone', '', '91')).toBe('Please enter your phone number.');
+    expect(client.validate('phone', '   ', '91')).toBe('Please enter your phone number.');
+    for (const v of ['---', '()', '+', 'abcdefghij', '98765 abc 43210', phoneShape('+91 ##### ##### x2')]) {
+      expect(client.validate('phone', v, '91'), v).toBe('Please enter a valid phone number.');
     }
   });
 });

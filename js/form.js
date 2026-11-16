@@ -156,12 +156,18 @@
      leading "+" is invalid. A leading "+", or "00" (the international prefix), brings its own country
      code, which wins over the dropdown: +91 is checked as India, another listed code has its trunk 0
      dropped, an unlisted code is sent as typed, and either needs 8 to 15 digits with the code. "00" is
-     read after the separators are dropped, so "0 0" is the prefix too, and "00" before another 0 is not
-     the prefix: those zeros are trunk zeros. Without a prefix the dropdown's code applies, and India also
-     takes the number typed with 91 in front (12 digits). */
+     read after the separators are dropped, so "0 0" counts too, and "00" before another 0 is not the
+     prefix: those zeros are trunk zeros. With India in the dropdown only "+" and "0091" are international:
+     "00" and an Indian mobile is that mobile with its trunk 0 typed twice, and any other "00" number is
+     invalid. Without a prefix the dropdown's code applies, and India also takes the number typed with 91
+     in front (12 digits). */
   function normalisePhone(dial, value) {
     var s = String(value == null ? '' : value).replace(INVISIBLE, '').replace(/[\s\-\u2010-\u2015\u2212().]/g, '');
     var intl = s.charAt(0) === '+' ? s.slice(1) : /^00[1-9]/.test(s) ? s.slice(2) : null;
+    if (intl !== null && dial === '91' && s.charAt(0) !== '+') {
+      if (indianMobile(intl)) return indianMobile(intl);
+      if (intl.indexOf('91') !== 0) return '';
+    }
     if (intl !== null) {
       if (!/^[1-9]\d*$/.test(intl)) return '';
       var cc = typedCountryCode(intl);

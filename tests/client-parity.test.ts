@@ -83,7 +83,7 @@ function exampleMobile(dial: string) {
 }
 
 /** 10-digit national numbers with first digits 1-9, from a fixed seed so a failure reproduces. A first 0
- * is left out: typed after a trunk 0 it makes "00", the international prefix, which another test covers. */
+ * is left out: typed after a trunk 0 it makes "00", which another test covers. */
 function sampleNationals(count: number): string[] {
   let x = 20261116;
   const next = () => (x = (x * 1103515245 + 12345) % 2147483648);
@@ -145,7 +145,7 @@ describe('js/form.js phone rules against lib/schema.ts, run', () => {
     }
   });
 
-  it('a number typed with "+" or "00" and its country code is sent exactly as the server stores it, whatever the dropdown', () => {
+  it('a number typed with "+" and its country code is sent exactly as the server stores it, whatever the dropdown; so is one typed with "00" unless India is selected', () => {
     const typed = [
       ...DIAL_CODES.map((d) => exampleMobile(d).formatInternational()),
       // Countries the dropdown does not list: their codes are sent as typed.
@@ -157,8 +157,13 @@ describe('js/form.js phone rules against lib/schema.ts, run', () => {
       expect(stored, t).not.toBeNull();
       for (const dial of ['91', '1', '971', '39']) {
         expect(client.normalisePhone(dial, t), `${dial} ${t}`).toBe(stored);
-        expect(client.normalisePhone(dial, t.replace('+', '00')), `${dial} ${t} with 00`).toBe(stored);
+        if (dial !== '91') expect(client.normalisePhone(dial, t.replace('+', '00')), `${dial} ${t} with 00`).toBe(stored);
       }
+      // With India selected "00" brings only India's own code (0091); digits that make an Indian mobile are
+      // that mobile (see the next test), and every other number typed with "00" is refused.
+      const digits = t.replace(/\D/g, '');
+      const withIndia = stored!.startsWith('+91') ? stored : /^[6-9]\d{9}$/.test(digits) ? `+91${digits}` : '';
+      expect(client.normalisePhone('91', t.replace('+', '00')), `91 ${t} with 00`).toBe(withIndia);
     }
   });
 
@@ -178,23 +183,47 @@ describe('js/form.js phone rules against lib/schema.ts, run', () => {
     expect(client.normalisePhone('44', '7911 12345')).toBe('+44791112345');
   });
 
-  it('"00" is the international prefix, so a trunk 0 typed twice before an Indian mobile is read as a foreign number', () => {
-    // The digits after "00" (spaces between the zeros or not) start the country code, whatever the dropdown.
-    // A mobile starting 91 reads as +91 and 8 digits, which the browser refuses.
-    expect(client.normalisePhone('91', '009195923342')).toBe('');
-    expect(client.validate('phone', '009195923342', '91')).toBe('Please enter a valid phone number.');
-    // Most others are sent and the server refuses them: +98 (Iran) is not listed, +92 (Pakistan) is.
-    const refused: [string, string][] = [['00 98765 43210', '+9876543210'], ['0 0 98765 43210', '+9876543210'], ['009212345678', '+9212345678']];
-    for (const [typed, sent] of refused) {
-      expect(client.normalisePhone('91', typed), typed).toBe(sent);
-      expect(serverPhone(sent), sent).toBeNull();
+  it('with India selected, "00" and an Indian mobile is the mobile with a trunk 0 typed twice; only "+" and "0091" are international', () => {
+    // Spaced or not, the two zeros before a mobile are dropped, and the server stores what is sent.
+    for (const shape of ['00##########', '00 ##### #####', '0 0 ##### #####', '0-0-#####-#####', '‪00 ##### #####‬']) {
+      expect(client.normalisePhone('91', phoneShape(shape)), shape).toBe(IN_STORED);
     }
-    // A few make a valid foreign number, and the server stores it: +65 (Singapore), +960 (Maldives).
-    const stored: [string, string][] = [['006581234567', '+6581234567'], ['009607123456', '+9607123456']];
-    for (const [typed, sent] of stored) {
-      expect(client.normalisePhone('91', typed), typed).toBe(sent);
-      expect(serverPhone(sent), sent).toBe(sent);
+    expect(serverPhone(IN_STORED)).toBe(IN_STORED);
+    // A mobile that starts 91 is the mobile, not India's code and 8 digits.
+    const starts91 = `91${IN_MOBILE.slice(2)}`;
+    expect(client.normalisePhone('91', phoneShape('00##########', starts91))).toBe(`+91${starts91}`);
+    expect(serverPhone(`+91${starts91}`)).toBe(`+91${starts91}`);
+    // "0091" and "+91" are India's code, trunk 0 or not.
+    for (const shape of ['0091 ##########', '0091 0##########', '00 91 ##### #####', '+91 ##### #####']) {
+      expect(client.normalisePhone('91', phoneShape(shape)), shape).toBe(IN_STORED);
     }
+    // Every 10-digit mobile typed after "00" is sent as that Indian mobile, never as a foreign number.
+    let mobiles = 0;
+    for (const n of sampleNationals(2000).filter((x) => /^[6-9]/.test(x))) {
+      mobiles++;
+      expect(client.normalisePhone('91', `00${n}`), n).toBe(`+91${n}`);
+      expect(client.normalisePhone('91', `00 ${n.slice(0, 5)} ${n.slice(5)}`), n).toBe(`+91${n}`);
+    }
+    expect(mobiles).toBeGreaterThan(800);
+    // Any other "00" number is refused in the browser; typed with "+" the same number is sent.
+    for (const [typed, plus] of [['00971501234567', '+971501234567'], ['0044 7911 123456', '+447911123456'], ['00 92 300 1234567', '+923001234567']]) {
+      expect(client.normalisePhone('91', typed!), typed).toBe('');
+      expect(client.validate('phone', typed!, '91'), typed).toBe('Please enter a valid phone number.');
+      expect(client.normalisePhone('91', plus!), plus).toBe(plus);
+      expect(serverPhone(plus!), plus).toBe(plus);
+    }
+    // Indian digits of the wrong length or first digit after "00" are refused too.
+    for (const typed of ['005876543210', '0098765', '00915876543210']) {
+      expect(client.normalisePhone('91', typed), typed).toBe('');
+    }
+  });
+
+  it('with another country selected, "00" is still the international prefix, whatever digits follow', () => {
+    expect(client.normalisePhone('44', '00971501234567')).toBe('+971501234567');
+    expect(client.normalisePhone('971', '0044 7911 123456')).toBe('+447911123456');
+    // The digits of an Indian mobile after "00" start a country code, as they would be dialled.
+    expect(client.normalisePhone('44', phoneShape('00##########'))).toBe(`+${IN_MOBILE}`);
+    expect(client.normalisePhone('44', phoneShape('0091 ##########'))).toBe(IN_STORED);
   });
 
   it('drops spaces, dashes, dots and parentheses, pasted typographic ones included', () => {

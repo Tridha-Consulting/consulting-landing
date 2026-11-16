@@ -271,7 +271,10 @@ describe('js/form.js in jsdom', () => {
     ['91', phoneShape('+91 ##### #####'), IN_STORED, '+91 with spaces'],
     ['91', phoneShape('+91-#####-#####'), IN_STORED, '+91 with dashes'],
     ['91', phoneShape('(+91) ##### #####'), IN_STORED, '+91 in parentheses'],
-    ['91', phoneShape('0091 ##########'), IN_STORED, '00, the international prefix'],
+    ['91', phoneShape('0091 ##########'), IN_STORED, '0091, the international prefix and the code for India'],
+    ['91', phoneShape('00##########'), IN_STORED, '00 before a mobile with India selected: a trunk 0 typed twice'],
+    ['91', phoneShape('0 0 ##### #####'), IN_STORED, '"0 0", the two zeros spaced apart'],
+    ['91', phoneShape('000 ##### #####'), IN_STORED, 'three zeros, all trunk zeros'],
     ['91', phoneShape('#####.#####'), IN_STORED, 'dots'],
     ['91', phoneShape('‪##### #####‬'), IN_STORED, 'pasted from a phone, wrapped in invisible direction marks'],
     ['91', phoneShape('‪+91 ##### #####‬'), IN_STORED, '+91, pasted from a phone'],
@@ -283,6 +286,7 @@ describe('js/form.js in jsdom', () => {
     ['91', '+971 50 123 4567', '+971501234567', 'a typed UAE code wins over the India dropdown'],
     ['91', '+44 7911 123456', '+447911123456', 'a typed UK code wins over the India dropdown'],
     ['44', phoneShape('+91 ##### #####'), IN_STORED, 'a typed +91 wins over the UK dropdown'],
+    ['44', '00971501234567', '+971501234567', 'with the UK dropdown 00 is still the international prefix'],
     ['971', '050 123 4567', '+971501234567', 'the UAE dropdown, trunk 0 dropped'],
     ['39', '06 1234 5678', '+390612345678', 'the Italy dropdown keeps the 0'],
     ['91', '+39 06 1234 5678', '+390612345678', 'a typed Italy code keeps the 0'],
@@ -313,6 +317,8 @@ describe('js/form.js in jsdom', () => {
     ['91', '98765 abc 43210', 'Please enter a valid phone number.', 'letters among the digits'],
     ['91', '---', 'Please enter a valid phone number.', 'separators only'],
     ['44', '+44 7911', 'Please enter a valid phone number.', 'a typed code with under 8 digits'],
+    ['91', '00971501234567', 'Please enter a valid phone number.', '00 and a UAE number with India selected (only + and 0091 are international)'],
+    ['91', '0044 7911 123456', 'Please enter a valid phone number.', '00 and a UK number with India selected'],
     ['91', '', 'Please enter your phone number.', 'empty'],
     ['91', '   ', 'Please enter your phone number.', 'spaces only'],
     ['91', '‪ ‬', 'Please enter your phone number.', 'invisible characters only'],
@@ -333,7 +339,6 @@ describe('js/form.js in jsdom', () => {
   // its 400 names the phone field. The route answers with the server schema's own verdict and message.
   it.each([
     ['+44 7911 12345', '+44791112345', 'a UK mobile one digit short'],
-    ['00 98765 43210', '+9876543210', '"00" read as the international prefix (+98)'],
   ])('typed %j posts %s, which only the server refuses; its message shows under the phone field (%s)', async (typed, posted) => {
     const p = await loadPage('', '', undefined, (_url, body) => {
       const r = leadSchema.safeParse(body);

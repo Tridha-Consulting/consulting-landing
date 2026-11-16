@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { JSDOM } from 'jsdom';
 import { describe, expect, it } from 'vitest';
 
 const read = (p: string): string => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
@@ -61,12 +62,14 @@ function inlineScripts(html: string): string[] {
   return [...html.matchAll(/<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]!);
 }
 
+/* jsdom parses without scripting, so <noscript> contents are elements and are checked too. The DOM hands back each attribute
+   decoded and whatever its quoting, which is the string a browser hashes. */
+const doc = (html: string): Document => new JSDOM(html).window.document;
+
 function inlineHandlers(html: string): string[] {
-  return [...html.matchAll(/\son[a-z]+=(?:"([^"]*)"|'([^']*)')/g)].map((m) => {
-    const code = m[1] ?? m[2]!;
-    if (code.includes('&')) throw new Error(`decode the HTML entities in ${code} before hashing it`);
-    return code;
-  });
+  return [...doc(html).querySelectorAll('*')].flatMap((el) =>
+    [...el.attributes].filter((a) => a.name.startsWith('on')).map((a) => a.value),
+  );
 }
 
 const origin = (url: string): string => new URL(url).origin;
@@ -141,10 +144,16 @@ const VENDOR_NEEDS: Record<string, Needs> = {
   },
 };
 
-/* Google Fonts CSS points at font files on fonts.gstatic.com, fetched in CORS mode, which is why its preconnect carries crossorigin. */
+const thirdPartyLinks = (selector: string): string[] =>
+  PAGES.flatMap((p) => [...doc(read(p)).querySelectorAll<HTMLLinkElement>(selector)].map((l) => l.getAttribute('href')!))
+    .filter((href) => href.startsWith('https://'))
+    .map(origin);
+
+/* A preload as=style is fetched under style-src, like the stylesheet it becomes. Google Fonts CSS points at font files on
+   fonts.gstatic.com, fetched in CORS mode, which is why its preconnect carries crossorigin. */
 const PAGE_NEEDS: Needs = {
-  'style-src': PAGES.flatMap((p) => [...read(p).matchAll(/<link rel="stylesheet" href="(https:\/\/[^"]+)"/g)].map((m) => origin(m[1]!))),
-  'font-src': PAGES.flatMap((p) => [...read(p).matchAll(/<link rel="preconnect" href="(https:\/\/[^"]+)" crossorigin>/g)].map((m) => origin(m[1]!))),
+  'style-src': thirdPartyLinks('link[rel="stylesheet"], link[rel="preload"][as="style"]'),
+  'font-src': thirdPartyLinks('link[rel="preconnect"][crossorigin]'),
 };
 
 function needs(name: Directive): string[] {
@@ -182,14 +191,36 @@ describe('security headers (vercel.json)', () => {
 
   it.each(PAGES)('hashes every inline script and handler on %s into script-src', (page) => {
     const html = read(page);
-    for (const code of [...inlineScripts(html), ...inlineHandlers(html)]) expect(directive('script-src')).toContain(sha256(code));
+    for (const code of [...inlineScripts(html), ...inlineHandlers(html)]) {
+      expect(directive('script-src'), `script-src has no hash for ${code} on ${page}`).toContain(sha256(code));
+    }
     if (inlineHandlers(html).length) expect(directive('script-src')).toContain("'unsafe-hashes'");
   });
 
   it("keeps book.html's never-blank guard and its onerror handler under a hash", () => {
     const html = read('book.html');
     expect(inlineScripts(html)).toHaveLength(1);
-    expect(inlineHandlers(html)).toEqual(['trdBookStaticFallback()']);
+    expect(inlineHandlers(html)).toContain('trdBookStaticFallback()');
+  });
+
+  /* A plain stylesheet link blocks first paint until fonts.googleapis.com answers. The preload fetches it without blocking and
+     its onload applies it; the noscript copy applies it when scripting is off, since that onload never runs then. */
+  it.each(PAGES)('loads the Google Fonts stylesheet on %s without blocking render', (page) => {
+    const d = doc(read(page));
+    const fonts = [...d.querySelectorAll<HTMLLinkElement>('link[href^="https://fonts.googleapis.com/"]')];
+    const preload = fonts.filter((l) => l.rel === 'preload');
+    expect(preload, 'one preload of the Google Fonts CSS').toHaveLength(1);
+    expect(preload[0]!.getAttribute('as')).toBe('style');
+    expect(preload[0]!.getAttribute('onload')).toBe("this.onload=null;this.rel='stylesheet'");
+    expect(preload[0]!.href).toContain('display=swap');
+    const fallback = fonts.filter((l) => l.rel === 'stylesheet');
+    expect(fallback, 'the only stylesheet link to the Google Fonts CSS sits in <noscript>').toHaveLength(1);
+    expect(fallback[0]!.parentElement?.localName).toBe('noscript');
+    expect(fallback[0]!.href).toBe(preload[0]!.href);
+    expect(inlineHandlers(read(page))).toContain(preload[0]!.getAttribute('onload'));
+    const preconnect = (href: string) => d.querySelector<HTMLLinkElement>(`link[rel="preconnect"][href="${href}"]`);
+    expect(preconnect('https://fonts.googleapis.com')?.hasAttribute('crossorigin')).toBe(false);
+    expect(preconnect('https://fonts.gstatic.com')?.hasAttribute('crossorigin')).toBe(true);
   });
 
   it('carries no hash for a script that no longer exists', () => {

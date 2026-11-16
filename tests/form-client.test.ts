@@ -617,6 +617,303 @@ describe('js/form.js keeps a draft of the answers for a reload in the same tab',
   });
 });
 
+/** jsdom lays nothing out, so every element has no client rects and the modal's focus trap would find nothing tabbable. */
+function layOut(p: Page) {
+  p.window.Element.prototype.getClientRects = function () { return [{}] as unknown as DOMRectList; };
+}
+
+/** Presses Tab (Shift+Tab with `shift`) on the focused element. jsdom has no default action for it: a press the
+    page does not cancel is one it leaves to the browser's own move. */
+function pressTab(p: Page, shift = false) {
+  const ev = new p.window.KeyboardEvent('keydown', { key: 'Tab', shiftKey: shift, bubbles: true, cancelable: true });
+  (p.document.activeElement ?? p.document.body).dispatchEvent(ev);
+  return ev;
+}
+
+/** A mouse press on `target`, then what a browser does by default and jsdom does not: unless the page cancels the
+    press, the focus moves to the pressed element's nearest focusable ancestor, or to the body when there is none. */
+function pressMouse(p: Page, target: Element) {
+  const ev = new p.window.MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 });
+  target.dispatchEvent(ev);
+  if (!ev.defaultPrevented) {
+    const focusable = target.closest('a[href], button, input, select, textarea, iframe, [tabindex]') as HTMLElement | null;
+    if (focusable) focusable.focus();
+    else (p.document.activeElement as HTMLElement | null)?.blur();
+  }
+  return ev;
+}
+
+function pressEscape(p: Page) {
+  (p.document.activeElement ?? p.document.body).dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+}
+
+/** What Chromium does to a focused button once it is disabled, and jsdom does not: the focus drops to the page body.
+    jsdom ignores blur() on a disabled element, so the button is enabled for the blur and disabled again. */
+function dropFocusOf(p: Page, button: HTMLButtonElement) {
+  expect(p.document.activeElement).toBe(button);
+  expect(button.disabled).toBe(true);
+  button.disabled = false;
+  button.blur();
+  button.disabled = true;
+  expect(p.document.activeElement).toBe(p.document.body);
+}
+
+type Answer = () => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
+const answer = (status: number, body: unknown): Answer => () => Promise.resolve({ ok: status < 400, status, json: () => Promise.resolve(body) });
+
+/** Every /api/lead request gets `reply`. */
+function answerLeads(p: Page, reply: Answer) {
+  (p.window as unknown as { fetch: unknown }).fetch = (url: string, init: Call['init']) => {
+    p.calls.push({ url, init });
+    return reply();
+  };
+}
+
+const GENERIC_LEAD_ERROR = 'Sorry, something went wrong and your details were not sent. Please try again, or contact us at contact@tridha.net.';
+
+/* Every way /api/lead can fail without naming a form field: each ends in the generic message. */
+const LEAD_FAILURES: [string, Answer][] = [
+  ['a 500', answer(500, { ok: false, error: 'write_failed' })],
+  ['a 502', answer(502, { ok: false, error: 'write_failed' })],
+  ['a 409', answer(409, { ok: false, error: 'conflict' })],
+  ['a 429 (rate limited)', answer(429, { ok: false, error: 'rate_limited' })],
+  ['a 400 captcha_failed', answer(400, { ok: false, error: 'captcha_failed' })],
+  ['a 400 whose fields are none of the form', answer(400, { ok: false, error: 'validation_failed', fields: { landingUrl: ['Too long'] } })],
+  ['a 400 whose body is not JSON', () => Promise.resolve({ ok: false, status: 400, json: () => Promise.reject(new SyntaxError('Unexpected token <')) })],
+  ['a network failure', () => Promise.reject(new TypeError('Failed to fetch'))],
+];
+
+describe('js/form.js keeps the keyboard inside the modal', () => {
+  /* Opens the form, fills it, and sends it from the focused Submit button, as a keyboard user does. */
+  async function sendFromKeyboard(p: Page) {
+    const form = openForm(p);
+    fillValid(p, form);
+    submitButton(form).focus();
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(1));
+    return form;
+  }
+
+  it.each(LEAD_FAILURES)('after %s the error message takes the focus, and Tab moves on from it inside the modal', async (_name, reply) => {
+    const p = await loadPage();
+    answerLeads(p, reply);
+    const form = await sendFromKeyboard(p);
+    const alert = submitError(form);
+    await vi.waitFor(() => expect(p.document.activeElement).toBe(alert));
+    expect(alert.textContent).toBe(GENERIC_LEAD_ERROR);
+    expect(alert.getAttribute('role')).toBe('alert');
+    expect(alert.getAttribute('tabindex')).toBe('-1');
+    expect(alert.closest('.trd-overlay.is-open')).not.toBeNull();
+    expect(submitButton(form).disabled).toBe(false);
+    // Controls lie on both sides of the message (its contact link and Submit after, the answers before), so the
+    // trap leaves both moves to the browser, which goes on from the message and cannot leave the modal.
+    layOut(p);
+    expect(pressTab(p).defaultPrevented).toBe(false);
+    expect(pressTab(p, true).defaultPrevented).toBe(false);
+    expect(p.document.activeElement).toBe(alert);
+    expect(p.errors).toEqual([]);
+  });
+
+  it('after a send aborted at 20 seconds the error message takes the focus', async () => {
+    const p = await loadPage();
+    const timers = handTimers(p);
+    hangingFetch(p);
+    const form = await sendFromKeyboard(p);
+    expect(p.document.activeElement).not.toBe(submitError(form));
+    timers.fire(20000);
+    await vi.waitFor(() => expect(p.document.activeElement).toBe(submitError(form)));
+    expect(submitError(form).textContent).toBe(GENERIC_LEAD_ERROR);
+  });
+
+  it('a 400 that names form fields still focuses the first of them, not the message', async () => {
+    const p = await loadPage();
+    answerLeads(p, answer(400, { ok: false, error: 'validation_failed', fields: { website: ['Enter a website'], phone: ['Enter a valid phone number'] } }));
+    const form = await sendFromKeyboard(p);
+    await vi.waitFor(() => expect(errorText(form, 'phone')).toBe('Enter a valid phone number'));
+    expect(errorText(form, 'website')).toBe('Enter a website');
+    expect(p.document.activeElement).toBe(form.querySelector('input[name="phone"]'));
+    expect(submitError(form).textContent).toBe('');
+  });
+
+  it('a send that fails after the modal was closed leaves the focus on the button that opened it', async () => {
+    const p = await loadPage();
+    let down!: () => void;
+    answerLeads(p, () => new Promise((_, reject) => { down = () => reject(new TypeError('Failed to fetch')); }));
+    const trigger = p.document.querySelector('.trd-book-btn') as HTMLElement;
+    const form = await sendFromKeyboard(p);
+    pressEscape(p);
+    expect(p.document.activeElement).toBe(trigger);
+    down();
+    await vi.waitFor(() => expect(submitError(form).textContent).toBe(GENERIC_LEAD_ERROR));
+    expect(p.document.activeElement).toBe(trigger);
+  });
+
+  type HeldFailure = 'a 500' | 'a network failure';
+  /** /api/lead answers only when the returned function is called: with a 500, or by failing as a network does. */
+  function holdLead(p: Page) {
+    let settle: ((kind: HeldFailure) => void) | undefined;
+    answerLeads(p, () => new Promise((resolve, reject) => {
+      settle = (kind) => (kind === 'a 500'
+        ? resolve({ ok: false, status: 500, json: () => Promise.resolve({ ok: false, error: 'write_failed' }) })
+        : reject(new TypeError('Failed to fetch')));
+    }));
+    return (kind: HeldFailure) => {
+      if (!settle) throw new Error('no /api/lead request is waiting');
+      settle(kind);
+    };
+  }
+  const HELD: HeldFailure[] = ['a 500', 'a network failure'];
+  const companyInput = (form: HTMLFormElement) => form.querySelector('input[name="company"]') as HTMLInputElement;
+
+  it.each(HELD)('after Enter in a field, left alone while the send ran, %s moves the focus to the error message', async (kind) => {
+    const p = await loadPage();
+    const settle = holdLead(p);
+    const form = openForm(p);
+    fillValid(p, form);
+    companyInput(form).focus();
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(1));
+    expect(p.document.activeElement).toBe(companyInput(form));
+    settle(kind);
+    await vi.waitFor(() => expect(p.document.activeElement).toBe(submitError(form)));
+    expect(submitError(form).textContent).toBe(GENERIC_LEAD_ERROR);
+  });
+
+  it.each(HELD)('when the focus dropped to the page body during the send (Chromium does that to a disabled button), %s moves it to the error message', async (kind) => {
+    const p = await loadPage();
+    const settle = holdLead(p);
+    const form = await sendFromKeyboard(p);
+    dropFocusOf(p, submitButton(form));
+    settle(kind);
+    await vi.waitFor(() => expect(p.document.activeElement).toBe(submitError(form)));
+  });
+
+  it.each(HELD)('a visitor who went back to another field and typed while the send ran keeps the focus and every key there after %s', async (kind) => {
+    const p = await loadPage();
+    const settle = holdLead(p);
+    const form = await sendFromKeyboard(p);
+    const company = companyInput(form);
+    company.focus();
+    setText(p, form, 'company', 'Acme Industries Pvt');
+    settle(kind);
+    await vi.waitFor(() => expect(submitError(form).textContent).toBe(GENERIC_LEAD_ERROR));
+    expect(p.document.activeElement).toBe(company);
+    // Keys typed after the failure still reach the field.
+    setText(p, form, 'company', 'Acme Industries Pvt Ltd');
+    expect(p.document.activeElement).toBe(company);
+    expect(company.value).toBe('Acme Industries Pvt Ltd');
+  });
+
+  it.each(HELD)('a visitor who only moved to another control while the send ran keeps the focus there after %s', async (kind) => {
+    const p = await loadPage();
+    const settle = holdLead(p);
+    const form = await sendFromKeyboard(p);
+    const website = form.querySelector('input[name="website"]') as HTMLInputElement;
+    website.focus();
+    settle(kind);
+    await vi.waitFor(() => expect(submitError(form).textContent).toBe(GENERIC_LEAD_ERROR));
+    expect(p.document.activeElement).toBe(website);
+  });
+
+  it.each(HELD)('a visitor who sent with Enter in a field and went on typing in it keeps the focus there after %s', async (kind) => {
+    const p = await loadPage();
+    const settle = holdLead(p);
+    const form = openForm(p);
+    fillValid(p, form);
+    const company = companyInput(form);
+    company.focus();
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(1));
+    setText(p, form, 'company', 'Acme Industries Pvt');
+    settle(kind);
+    await vi.waitFor(() => expect(submitError(form).textContent).toBe(GENERIC_LEAD_ERROR));
+    expect(p.document.activeElement).toBe(company);
+  });
+
+  it.each([
+    ['a mouse or touch press back in it', (p: Page, company: HTMLInputElement) => { pressMouse(p, company); }],
+    ['an arrow key in it', (p: Page, company: HTMLInputElement) => { company.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true })); }],
+  ] as [string, (p: Page, company: HTMLInputElement) => void][])('a visitor who sent with Enter in a field, then made %s without typing, keeps the focus there after a failure', async (_name, act) => {
+    const p = await loadPage();
+    const settle = holdLead(p);
+    const form = openForm(p);
+    fillValid(p, form);
+    const company = companyInput(form);
+    company.focus();
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(1));
+    act(p, company);
+    expect(p.document.activeElement).toBe(company);
+    settle('a 500');
+    await vi.waitFor(() => expect(submitError(form).textContent).toBe(GENERIC_LEAD_ERROR));
+    expect(p.document.activeElement).toBe(company);
+  });
+
+  it('only what the visitor does during the send counts: the answers typed and the Enter that sent them do not keep the focus off the message', async () => {
+    const p = await loadPage();
+    const settle = holdLead(p);
+    const form = openForm(p);
+    fillValid(p, form);
+    const company = companyInput(form);
+    pressMouse(p, company);
+    setText(p, form, 'company', 'Acme Industries Pvt');
+    company.dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(1));
+    settle('a 500');
+    await vi.waitFor(() => expect(p.document.activeElement).toBe(submitError(form)));
+  });
+
+  it('a press on the backdrop closes the modal and returns the focus to the button that opened it, as Esc does', async () => {
+    const p = await loadPage();
+    const overlay = () => p.document.querySelector('.trd-overlay') as HTMLElement;
+    const trigger = p.document.querySelectorAll('.trd-book-btn')[1] as HTMLElement;
+    trigger.focus();
+    trigger.click();
+    expect(overlay().classList.contains('is-open')).toBe(true);
+    // The reference: Esc.
+    pressEscape(p);
+    expect(overlay().classList.contains('is-open')).toBe(false);
+    expect(p.document.activeElement).toBe(trigger);
+
+    trigger.click();
+    expect(overlay().classList.contains('is-open')).toBe(true);
+    expect(p.document.activeElement).not.toBe(trigger);
+    const press = pressMouse(p, overlay());
+    expect(overlay().classList.contains('is-open')).toBe(false);
+    expect(press.defaultPrevented, 'the press cannot move the focus after close()').toBe(true);
+    expect(p.document.activeElement).toBe(trigger);
+    expect(p.document.body.style.overflow).toBe('');
+    expect(p.document.querySelector('.trd-lp')?.hasAttribute('inert')).toBe(false);
+    expect(p.errors).toEqual([]);
+  });
+
+  it('a press inside the card is not cancelled and does not close the modal', async () => {
+    const p = await loadPage();
+    const form = openForm(p);
+    const company = form.querySelector('input[name="company"]') as HTMLInputElement;
+    const press = pressMouse(p, company);
+    expect(press.defaultPrevented).toBe(false);
+    expect(p.document.activeElement).toBe(company);
+    expect(pressMouse(p, p.document.querySelector('.trd-card')!).defaultPrevented).toBe(false);
+    expect(p.document.querySelector('.trd-overlay')!.classList.contains('is-open')).toBe(true);
+  });
+
+  it('Tab from the thank-you, with nothing tabbable after it, wraps to the close button; Shift+Tab is left to the browser', async () => {
+    const p = await loadPage();
+    const form = await sendFromKeyboard(p);
+    await vi.waitFor(() => expect(p.document.querySelector('.trd-thanks')).not.toBeNull());
+    expect(form.isConnected).toBe(false);
+    const thanks = p.document.querySelector('.trd-thanks') as HTMLElement;
+    expect(p.document.activeElement).toBe(thanks);
+    layOut(p);
+    expect(pressTab(p, true).defaultPrevented).toBe(false);
+    expect(p.document.activeElement).toBe(thanks);
+    expect(pressTab(p).defaultPrevented).toBe(true);
+    expect(p.document.activeElement).toBe(p.document.querySelector('.trd-close'));
+  });
+});
+
 describe('js/form.js when the email domain has no mail server', () => {
   const CAL = 'tridha-consulting/exploration-call';
   const LEAD_ID = '11111111-1111-4111-8111-111111111111';
@@ -926,6 +1223,151 @@ describe('js/form.js when the email domain has no mail server', () => {
     expect(continueBtn(p).disabled).toBe(false);
     expect(p.document.querySelector('.trd-fix')).not.toBeNull();
     expect(p.prefills).toHaveLength(0);
+  });
+
+  const fixAlert = (p: Page) => p.document.querySelector('.trd-fix .trd-submit-error') as HTMLElement;
+
+  it.each([
+    ['a network failure', () => Promise.reject(new TypeError('network down')), 'something went wrong'],
+    ['a 500', { status: 500, body: { ok: false, error: 'x' } }, 'something went wrong'],
+    ['a 502', { status: 502, body: { ok: false, error: 'write_failed' } }, 'something went wrong'],
+    ['a 403', { status: 403, body: { ok: false, error: 'forbidden' } }, 'something went wrong'],
+    ['a 400 with no message for the email', { status: 400, body: { ok: false, error: 'validation_failed', fields: {} } }, 'something went wrong'],
+    ['a 409', { status: 409, body: { ok: false, error: 'not_correctable' } }, "We can't update your email here"],
+  ] as [string, Reply | (() => Promise<Reply>), string][])('after %s the step\'s error message takes the focus, and Tab moves on from it inside the modal', async (_name, reply, text) => {
+    const p = await reachFixStep(reply);
+    continueBtn(p).focus();
+    cont(p);
+    const alert = fixAlert(p);
+    await vi.waitFor(() => expect(p.document.activeElement).toBe(alert));
+    expect(fixFormError(p)).toContain(text);
+    expect(alert.getAttribute('role')).toBe('alert');
+    expect(alert.getAttribute('tabindex')).toBe('-1');
+    expect(continueBtn(p).disabled).toBe(false);
+    layOut(p);
+    expect(pressTab(p).defaultPrevented).toBe(false);
+    expect(pressTab(p, true).defaultPrevented).toBe(false);
+    expect(p.errors).toEqual([]);
+  });
+
+  it('after a correction aborted at 15 seconds the step\'s error message takes the focus', async () => {
+    const p = await reachFixStep();
+    const timers = handTimers(p);
+    hangingFetch(p);
+    continueBtn(p).focus();
+    cont(p);
+    await vi.waitFor(() => expect(p.fixCalls()).toHaveLength(1));
+    expect(p.document.activeElement).not.toBe(fixAlert(p));
+    timers.fire(15000);
+    await vi.waitFor(() => expect(p.document.activeElement).toBe(fixAlert(p)));
+    expect(fixFormError(p)).toContain('something went wrong');
+  });
+
+  it('a 400 that names the email focuses the input, not the message', async () => {
+    const p = await reachFixStep({ status: 400, body: { ok: false, error: 'validation_failed', fields: { email: ['Enter a valid email'] } } });
+    continueBtn(p).focus();
+    cont(p);
+    await vi.waitFor(() => expect(fixError(p)).toBe('Enter a valid email'));
+    expect(p.document.activeElement).toBe(fixInput(p));
+    expect(fixFormError(p)).toBe('');
+  });
+
+  /* /api/lead-email answers only when the returned function is called; an Error fails the request as a network does. */
+  async function holdFix() {
+    let settle: ((r: Reply | Error) => void) | undefined;
+    const p = await reachFixStep(() => new Promise<Reply>((resolve, reject) => {
+      settle = (r) => (r instanceof Error ? reject(r) : resolve(r));
+    }));
+    return {
+      p,
+      settle(r: Reply | Error) {
+        if (!settle) throw new Error('no /api/lead-email request is waiting');
+        settle(r);
+      },
+    };
+  }
+  const HELD_FIX: [string, () => Reply | Error, string][] = [
+    ['a 500', () => ({ status: 500, body: { ok: false, error: 'x' } }), 'something went wrong'],
+    ['a network failure', () => new TypeError('network down'), 'something went wrong'],
+    ['a 409', () => ({ status: 409, body: { ok: false, error: 'not_correctable' } }), "We can't update your email here"],
+  ];
+
+  it.each(HELD_FIX)('after Enter in the email input, left alone while Checking ran, %s moves the focus to the step\'s message', async (_name, reply, text) => {
+    const { p, settle } = await holdFix();
+    fixInput(p).focus();
+    cont(p);
+    await vi.waitFor(() => expect(p.fixCalls()).toHaveLength(1));
+    expect(p.document.activeElement).toBe(fixInput(p));
+    settle(reply());
+    await vi.waitFor(() => expect(p.document.activeElement).toBe(fixAlert(p)));
+    expect(fixFormError(p)).toContain(text);
+  });
+
+  it.each(HELD_FIX)('when the focus dropped to the page body while Checking ran, %s moves it to the step\'s message', async (_name, reply) => {
+    const { p, settle } = await holdFix();
+    continueBtn(p).focus();
+    cont(p);
+    await vi.waitFor(() => expect(p.fixCalls()).toHaveLength(1));
+    dropFocusOf(p, continueBtn(p));
+    settle(reply());
+    await vi.waitFor(() => expect(p.document.activeElement).toBe(fixAlert(p)));
+  });
+
+  it.each(HELD_FIX)('a visitor who pressed Continue, then went back to the email input and typed while Checking ran, keeps the focus there after %s', async (_name, reply, text) => {
+    const { p, settle } = await holdFix();
+    continueBtn(p).focus();
+    cont(p);
+    await vi.waitFor(() => expect(p.fixCalls()).toHaveLength(1));
+    fixInput(p).focus();
+    type(p, 'asha@acme-industries.co');
+    settle(reply());
+    await vi.waitFor(() => expect(fixFormError(p)).toContain(text));
+    expect(p.document.activeElement).toBe(fixInput(p));
+    type(p, 'asha@acme-industries.com');
+    expect(p.document.activeElement).toBe(fixInput(p));
+    expect(fixInput(p).value).toBe('asha@acme-industries.com');
+  });
+
+  it.each(HELD_FIX)('a visitor who only moved to Skip while Checking ran keeps the focus there after %s', async (_name, reply, text) => {
+    const { p, settle } = await holdFix();
+    continueBtn(p).focus();
+    cont(p);
+    await vi.waitFor(() => expect(p.fixCalls()).toHaveLength(1));
+    skipBtn(p).focus();
+    settle(reply());
+    await vi.waitFor(() => expect(fixFormError(p)).toContain(text));
+    expect(p.document.activeElement).toBe(skipBtn(p));
+  });
+
+  it.each(HELD_FIX)('a visitor who pressed Enter in the email input and went on typing in it keeps the focus there after %s', async (_name, reply, text) => {
+    const { p, settle } = await holdFix();
+    fixInput(p).focus();
+    cont(p);
+    await vi.waitFor(() => expect(p.fixCalls()).toHaveLength(1));
+    type(p, 'asha@acme-industries.co');
+    settle(reply());
+    await vi.waitFor(() => expect(fixFormError(p)).toContain(text));
+    expect(p.document.activeElement).toBe(fixInput(p));
+  });
+
+  it('a visitor who pressed Enter in the email input, then pressed back in it without typing, keeps the focus there after a failure', async () => {
+    const { p, settle } = await holdFix();
+    fixInput(p).focus();
+    cont(p);
+    await vi.waitFor(() => expect(p.fixCalls()).toHaveLength(1));
+    pressMouse(p, fixInput(p));
+    settle(new TypeError('network down'));
+    await vi.waitFor(() => expect(fixFormError(p)).toContain('something went wrong'));
+    expect(p.document.activeElement).toBe(fixInput(p));
+  });
+
+  it('Tab from the step title goes on to the email input (left to the browser), not back to the close button', async () => {
+    const p = await reachFixStep();
+    expect(p.document.activeElement).toBe(p.document.querySelector('.trd-fix-title'));
+    layOut(p);
+    expect(pressTab(p).defaultPrevented).toBe(false);
+    expect(pressTab(p, true).defaultPrevented).toBe(false);
+    expect(p.document.activeElement).toBe(p.document.querySelector('.trd-fix-title'));
   });
 
   it('inserts the domain as text: markup in it cannot create an element (render helper called directly)', async () => {

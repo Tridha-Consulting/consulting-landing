@@ -186,6 +186,8 @@
   /* inputs[k] is the control that carries aria-invalid (the input, or the fieldset of a choice group);
      choices[k] lists the radios/checkboxes of a group; wraps[k] is the element scrolled into view. */
   var inputs = {}, errs = {}, choices = {}, wraps = {}, busy = false, sent = false, doneEl = null;
+  /* Every key, mouse or touch press and edit in the modal (the form and the email step) counts one act; see focusAlert. */
+  var acts = 0;
   var tsToken = '', tsLoaded = false, tsWidgetId = null;
   var FIELD_ORDER = ['fullName', 'designation', 'phone', 'email', 'company', 'website',
     'revenue', 'budget', 'bottleneck', 'techTeam', 'timeline', 'decisionMaker'];
@@ -264,7 +266,7 @@
     ]);
     inputs.hp = hp.firstChild;
 
-    submitErr = el('div', { class: 'trd-submit-error', role: 'alert' });
+    submitErr = el('div', { class: 'trd-submit-error', role: 'alert', tabindex: '-1' });
     submitBtn = el('button', { type: 'submit', class: 'trd-btn', text: 'Submit' });
     var actions = el('div', { class: 'trd-actions' }, [el('span', { class: 'trd-spacer' }), submitBtn]);
 
@@ -280,7 +282,14 @@
     document.body.appendChild(overlay);
 
     closeBtn.addEventListener('click', close);
-    overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) close(); });
+    /* A press on the backdrop is cancelled as well as closing the modal. Its default action runs after this
+       listener and moves the focus to the pressed spot; the backdrop is not focusable, so the focus close() has
+       just returned to the button that opened the modal would drop to the page body (Esc has no such default). */
+    overlay.addEventListener('mousedown', function (e) {
+      if (e.target !== overlay) return;
+      e.preventDefault();
+      close();
+    });
     form.addEventListener('submit', onSubmit);
     FIELD_ORDER.forEach(function (k) {
       if (choices[k]) return;
@@ -290,6 +299,9 @@
     restoreDraft();
     form.addEventListener('input', saveDraft);
     form.addEventListener('change', saveDraft);
+    ['keydown', 'mousedown', 'input', 'change'].forEach(function (type) {
+      overlay.addEventListener(type, function () { acts++; });
+    });
     overlay.addEventListener('keydown', trapTab);
   }
 
@@ -477,12 +489,32 @@
     target.appendChild(document.createTextNode('.'));
   }
 
-  function fail() {
+  /* Where the focus was, and the act count, as a request starts: focusAlert compares them with the moment it fails. */
+  function focusMark() {
+    return { el: document.activeElement, acts: acts };
+  }
+
+  /* A failed send moves the focus to its message (role alert, tabindex -1) only from where the send left it: the
+     page body or anywhere else outside the modal (the pressed button was disabled while the request ran, which
+     drops its focus to the body), or the control the send came from, with nothing done in the modal since (Enter
+     in a field). A visitor who has moved to another control, or pressed a key or the pointer in the modal, while
+     the request ran keeps the focus where they put it, so no keystroke lands on the message, which its alert role
+     announces all the same. Once the modal has been closed (Esc during the request) nothing moves: the focus
+     stays on the button it went back to. */
+  function focusAlert(msg, mark) {
+    if (!overlay.classList.contains('is-open')) return;
+    var a = document.activeElement;
+    var outside = !a || a === document.body || !overlay.contains(a);
+    if (outside || (a === mark.el && acts === mark.acts)) msg.focus();
+  }
+
+  function fail(mark) {
     resetSubmit();
     showContactError(submitErr, 'Sorry, something went wrong and your details were not sent. Please try again, or');
     if (tsWidgetId !== null && window.turnstile) {
       try { window.turnstile.reset(tsWidgetId); tsToken = ''; } catch (e) { /* ignore */ }
     }
+    focusAlert(submitErr, mark);
   }
 
   var SUBMIT_TIMEOUT_MS = 20000;
@@ -490,6 +522,7 @@
   /* A request with no answer after SUBMIT_TIMEOUT_MS is aborted and fails like a network error: the
      button comes back and every answer stays, so the visitor can retry or use the fallback contact. */
   function send() {
+    var mark = focusMark();
     busy = true;
     submitBtn.disabled = true;
     submitBtn.textContent = '';
@@ -526,7 +559,7 @@
         });
       }
       throw new Error('HTTP ' + res.status);
-    }).catch(fail).then(function () {
+    }).catch(function () { fail(mark); }).then(function () {
       if (timer) clearTimeout(timer);
     });
   }
@@ -640,7 +673,7 @@
     var input = el('input', { class: 'trd-input', id: id + '-email', type: 'email', name: 'fix_email', autocomplete: 'email', inputmode: 'email', 'aria-label': 'Email', 'aria-describedby': id + '-title ' + id + '-err' });
     input.value = inputs.email.value.trim();
     var err = el('div', { class: 'trd-error', id: id + '-err', 'aria-live': 'polite' });
-    var formErr = el('div', { class: 'trd-submit-error', role: 'alert' });
+    var formErr = el('div', { class: 'trd-submit-error', role: 'alert', tabindex: '-1' });
     var go = el('button', { type: 'submit', class: 'trd-btn', text: 'Continue to booking' });
     var skip = el('button', { type: 'button', class: 'trd-suggest trd-skip', text: 'Skip \u2014 just call me' });
     var step = el('form', { class: 'trd-fix', novalidate: '', autocomplete: 'on' }, [
@@ -685,6 +718,7 @@
       var ctl = typeof window.AbortController === 'function' ? new window.AbortController() : null;
       pending = { abort: function () { if (ctl) ctl.abort(); } };
       var timer = ctl ? setTimeout(function () { try { ctl.abort(); } catch (e) { /* ignore */ } }, FIX_TIMEOUT_MS) : null;
+      var mark = focusMark();
       go.disabled = true;
       go.textContent = '';
       go.appendChild(el('span', { class: 'trd-spinner', 'aria-hidden': 'true' }));
@@ -724,6 +758,7 @@
           /* The row no longer accepts a change here (for example it was corrected from another tab). */
           idle();
           showContactError(formErr, "We can't update your email here. Please skip this step, or");
+          focusAlert(formErr, mark);
           return;
         }
         throw new Error('HTTP ' + res.status);
@@ -731,6 +766,7 @@
         if (gone) return;
         idle();
         showContactError(formErr, "Sorry, something went wrong and we couldn't check your email. Please try again, skip this step, or");
+        focusAlert(formErr, mark);
       }).then(function () {
         if (timer) clearTimeout(timer);
       });
@@ -771,6 +807,16 @@
     if (!f.length) { e.preventDefault(); return; }
     var first = f[0], last = f[f.length - 1], a = document.activeElement;
     var i = f.indexOf(a);
+    /* Focus on a spot outside the tab order (an error message or a step title, tabindex -1): while a tabbable
+       element lies ahead of it in the modal, the browser's own move goes on from there and cannot leave the modal;
+       past the last one (or before the first) the trap wraps. */
+    if (i === -1 && a && overlay.contains(a)) {
+      var after = f.filter(function (n) { return a.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING; }).length;
+      if (e.shiftKey ? f.length - after : after) return;
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+      return;
+    }
     if (e.shiftKey && (i <= 0)) { e.preventDefault(); last.focus(); }
     else if (!e.shiftKey && (i === -1 || a === last)) { e.preventDefault(); first.focus(); }
   }

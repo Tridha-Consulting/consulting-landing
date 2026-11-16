@@ -8,6 +8,7 @@
   var ENDPOINT = '/api/lead';
   var EMAIL_ENDPOINT = '/api/lead-email';
   var ATTR_KEY = 'tridha_attribution';
+  var DRAFT_KEY = 'trd-lead-draft-v1';
   var ATTR_PARAMS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid', 'gclid', 'li_fat_id', 'twclid', 'gbraid', 'wbraid'];
 
   /* Same rule names as lib/schema.ts (fullName, email, phone, designation, company, website, attribution).
@@ -83,11 +84,14 @@
 
   /* ---------- storage (every call guarded) ---------- */
   var memAttr = null;
-  function storeGet() {
-    try { return window.sessionStorage.getItem(ATTR_KEY); } catch (e) { return null; }
+  function storeGet(key) {
+    try { return window.sessionStorage.getItem(key); } catch (e) { return null; }
   }
-  function storeSet(v) {
-    try { window.sessionStorage.setItem(ATTR_KEY, v); } catch (e) { /* ignore */ }
+  function storeSet(key, v) {
+    try { window.sessionStorage.setItem(key, v); } catch (e) { /* ignore */ }
+  }
+  function storeDel(key) {
+    try { window.sessionStorage.removeItem(key); } catch (e) { /* ignore */ }
   }
 
   /* Control characters are dropped: each JSON-escapes to six bytes, so a crafted link could push the
@@ -103,7 +107,7 @@
       ATTR_PARAMS.forEach(function (k) { var v = q.get(k); if (v) { out[k] = clip(v); carriesCampaign = true; } });
     } catch (e) { /* ignore */ }
     if (!carriesCampaign) {
-      var existing = storeGet();
+      var existing = storeGet(ATTR_KEY);
       if (existing) {
         try { memAttr = JSON.parse(existing); return; } catch (e) { /* recapture below */ }
       }
@@ -111,7 +115,7 @@
     try { out.referrer = clip(document.referrer); } catch (e) { out.referrer = ''; }
     try { out.landing_url = clip(window.location.href); } catch (e) { out.landing_url = ''; }
     memAttr = out;
-    storeSet(JSON.stringify(out));
+    storeSet(ATTR_KEY, JSON.stringify(out));
   }
 
   function attributionPayload() {
@@ -283,7 +287,46 @@
       inputs[k].addEventListener('input', function () { setError(k, ''); submitErr.textContent = ''; if (k === 'email') formMemo.kept = null; });
     });
     inputs.dial.addEventListener('change', function () { setError('phone', ''); });
+    restoreDraft();
+    form.addEventListener('input', saveDraft);
+    form.addEventListener('change', saveDraft);
     overlay.addEventListener('keydown', trapTab);
+  }
+
+  /* In-progress answers outlive a reload in the same tab (sessionStorage, so they go when the tab closes)
+     and are dropped once the lead is saved. Only the visible answers and the country code are kept:
+     never the honeypot, never the Turnstile token. */
+  function saveDraft() {
+    if (sent) return;
+    var d = { dial: inputs.dial.value }, any = false;
+    FIELD_ORDER.forEach(function (k) {
+      var v = choices[k] ? answer(k) : inputs[k].value;
+      d[k] = v;
+      if (v.length) any = true;
+    });
+    if (any) storeSet(DRAFT_KEY, JSON.stringify(d)); else storeDel(DRAFT_KEY);
+  }
+
+  /* The stored draft is read back as untrusted input: a choice is restored only when it is one of the
+     current options, a country code only when it is listed, and text is cut to its field's limit
+     (the phone, which has none, to the email's 254, the longest any field accepts). */
+  function restoreDraft() {
+    var d = null;
+    try { d = JSON.parse(storeGet(DRAFT_KEY) || 'null'); } catch (e) { d = null; }
+    if (!d || typeof d !== 'object') return;
+    if (COUNTRIES.some(function (c) { return c[1] === d.dial; })) inputs.dial.value = d.dial;
+    FIELD_ORDER.forEach(function (k) {
+      var v = d[k];
+      if (choices[k]) {
+        var picked = Array.isArray(v) ? v : [v], room = k === 'bottleneck' ? MAX_BOTTLENECKS : 1;
+        choices[k].forEach(function (b) {
+          if (room > 0 && picked.indexOf(b.value) !== -1) { b.checked = true; room--; }
+        });
+      } else if (typeof v === 'string') {
+        inputs[k].value = v.slice(0, (RULES[k] && RULES[k].max) || RULES.email.max);
+      }
+    });
+    limitBottlenecks();
   }
 
   /* "Select up to two": with two ticked, the rest are disabled until one is unticked. */
@@ -369,7 +412,7 @@
 
   function emailHintShown() {
     return suggestInto(inputs.email, errs.email, formMemo,
-      function () { setError('email', ''); },
+      function () { setError('email', ''); saveDraft(); },
       function () { focusField('email', true); });
   }
 
@@ -442,6 +485,10 @@
     }
   }
 
+  var SUBMIT_TIMEOUT_MS = 20000;
+
+  /* A request with no answer after SUBMIT_TIMEOUT_MS is aborted and fails like a network error: the
+     button comes back and every answer stays, so the visitor can retry or use the fallback contact. */
   function send() {
     busy = true;
     submitBtn.disabled = true;
@@ -450,6 +497,8 @@
     submitBtn.appendChild(document.createTextNode('Submitting'));
     submitErr.textContent = '';
 
+    var ctl = typeof window.AbortController === 'function' ? new window.AbortController() : null;
+    var timer = null;
     var pre = CFG.TURNSTILE_SITE_KEY ? waitForToken(8000) : Promise.resolve('');
     pre.then(function (token) {
       var body = attributionPayload();
@@ -458,11 +507,13 @@
       });
       body.company_website = inputs.hp.value;
       if (token) body.turnstileToken = token;
+      timer = ctl ? setTimeout(function () { try { ctl.abort(); } catch (e) { /* ignore */ } }, SUBMIT_TIMEOUT_MS) : null;
       return fetch(ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        credentials: 'same-origin'
+        credentials: 'same-origin',
+        signal: ctl ? ctl.signal : undefined
       });
     }).then(function (res) {
       if (res.ok) {
@@ -475,7 +526,9 @@
         });
       }
       throw new Error('HTTP ' + res.status);
-    }).catch(fail);
+    }).catch(fail).then(function () {
+      if (timer) clearTimeout(timer);
+    });
   }
 
   /* Server validation_failed: put each message on its field and jump to the first affected field.
@@ -691,6 +744,7 @@
   function success(leadId, emailOk, fixToken) {
     sent = true;
     busy = false;
+    storeDel(DRAFT_KEY);
     card.removeChild(form);
     /* The form was long: the next state (email fix, calendar or thank-you) starts at the top of the overlay. */
     overlay.scrollTop = 0;

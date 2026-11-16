@@ -22,18 +22,33 @@ interface Page {
   window: JSDOM['window'];
   document: Document;
   calls: Call[];
+  /** Uncaught errors the page raised: jsdom reports a throwing listener or timer as a window 'error' event and carries on. */
+  errors: string[];
 }
 
 type Reply = { status: number; body: unknown };
 
+interface LoadOptions {
+  /** sessionStorage entries the page finds when its scripts run: what a reload in the same tab sees. */
+  storage?: Record<string, string>;
+  /** Runs on the window after `storage` is written and before the page's scripts, e.g. to make storage throw. */
+  before?: (window: JSDOM['window']) => void;
+  /** TURNSTILE_SITE_KEY for config.js (empty otherwise, as in the repo). */
+  turnstileSiteKey?: string;
+}
+
 /** `response` answers every request; `route` answers per request and may reject to simulate a network failure. */
-async function loadPage(search = '', calLink = '', response?: Reply, route?: (url: string, body: Record<string, unknown>) => Reply | Promise<Reply>): Promise<Page> {
+async function loadPage(search = '', calLink = '', response?: Reply, route?: (url: string, body: Record<string, unknown>) => Reply | Promise<Reply>, opts: LoadOptions = {}): Promise<Page> {
   const dom = new JSDOM(read('index.html'), {
     url: `http://localhost/${search}`,
     runScripts: 'outside-only',
     pretendToBeVisual: true,
   });
   const { window } = dom;
+  for (const [k, v] of Object.entries(opts.storage ?? {})) window.sessionStorage.setItem(k, v);
+  opts.before?.(window);
+  const errors: string[] = [];
+  window.addEventListener('error', (e) => errors.push(String(e.error?.message ?? e.message)));
   const calls: Call[] = [];
   const w = window as unknown as Record<string, unknown>;
   w.fetch = vi.fn((url: string, init: Call['init']) => {
@@ -48,16 +63,23 @@ async function loadPage(search = '', calLink = '', response?: Reply, route?: (ur
   });
   window.Element.prototype.scrollIntoView = () => {};
   // Empty CAL_LINK (the default here): success shows the thank-you instead of mounting the calendar.
-  window.eval(read('js/config.js').replace(/CAL_LINK:\s*'[^']*'/, `CAL_LINK: '${calLink}'`));
+  window.eval(read('js/config.js')
+    .replace(/CAL_LINK:\s*'[^']*'/, `CAL_LINK: '${calLink}'`)
+    .replace(/TURNSTILE_SITE_KEY:\s*'[^']*'/, `TURNSTILE_SITE_KEY: '${opts.turnstileSiteKey ?? ''}'`));
   for (const f of ['js/email-suggest.js', 'js/booking.js', 'js/form.js']) window.eval(read(f));
   if (window.document.readyState === 'loading') {
     await new Promise<void>((r) => window.document.addEventListener('DOMContentLoaded', () => r()));
   }
-  return { window, document: window.document, calls };
+  return { window, document: window.document, calls, errors };
 }
 
+/* Clicks Book and requires the modal to have opened. A throw while the form is built (restoring a draft
+   included) stops open() before it shows the overlay, and jsdom only reports the throw, so without these
+   checks the form would still be found, filled and sent. */
 function openForm(p: Page) {
   (p.document.querySelector('.trd-book-btn') as HTMLElement).click();
+  expect(p.errors, 'no uncaught error while opening the form').toEqual([]);
+  expect(p.document.querySelector('.trd-overlay')?.classList.contains('is-open'), 'the modal opened').toBe(true);
   return p.document.querySelector('form') as HTMLFormElement;
 }
 
@@ -276,6 +298,322 @@ describe('js/form.js in jsdom', () => {
     expect(errorText(form, 'phone')).toBe('');
     submit(p, form);
     await vi.waitFor(() => expect(p.calls).toHaveLength(2));
+  });
+});
+
+const DRAFT_KEY = 'trd-lead-draft-v1';
+const submitButton = (form: HTMLFormElement) => form.querySelector('button[type="submit"]') as HTMLButtonElement;
+const submitError = (form: HTMLFormElement) => form.querySelector('.trd-submit-error') as HTMLElement;
+
+function storageEntries(p: Page): Record<string, string> {
+  const s = p.window.sessionStorage;
+  const out: Record<string, string> = {};
+  for (let i = 0; i < s.length; i++) {
+    const k = s.key(i)!;
+    out[k] = s.getItem(k)!;
+  }
+  return out;
+}
+
+function draft(p: Page): Record<string, unknown> | null {
+  const raw = p.window.sessionStorage.getItem(DRAFT_KEY);
+  return raw === null ? null : (JSON.parse(raw) as Record<string, unknown>);
+}
+
+/** Every answer as the form shows it: each text value, the country code, and the ticked options of each group. */
+function answers(form: HTMLFormElement): Record<string, unknown> {
+  const out: Record<string, unknown> = { dial: (form.querySelector('select') as HTMLSelectElement).value };
+  for (const k of FIELD_KEYS) {
+    const els = Array.from(form.querySelectorAll(`input[name="${k}"]`)) as HTMLInputElement[];
+    const grouped = els[0]!.type === 'radio' || els[0]!.type === 'checkbox';
+    out[k] = grouped ? els.filter((e) => e.checked).map((e) => e.value) : els[0]!.value;
+  }
+  return out;
+}
+
+const TEXT_KEYS = ['fullName', 'designation', 'phone', 'email', 'company', 'website'];
+const EMPTY_ANSWERS = { dial: '91', ...Object.fromEntries(FIELD_KEYS.map((k) => [k, TEXT_KEYS.includes(k) ? '' : []])) };
+
+/** Replaces the page's setTimeout/clearTimeout with a list the test fires by hand. */
+function handTimers(p: Page) {
+  const w = p.window as unknown as { setTimeout: unknown; clearTimeout: unknown };
+  const timers = new Map<number, { fn: () => void; ms: number }>();
+  let next = 1;
+  w.setTimeout = (fn: () => void, ms: number) => {
+    timers.set(next, { fn, ms });
+    return next++;
+  };
+  w.clearTimeout = (id: number) => {
+    timers.delete(id);
+  };
+  return {
+    pending: () => [...timers.values()].map((t) => t.ms),
+    fire(ms: number) {
+      for (const [id, t] of timers) {
+        if (t.ms === ms) {
+          timers.delete(id);
+          t.fn();
+          return;
+        }
+      }
+      throw new Error(`no ${ms} ms timer is pending`);
+    },
+  };
+}
+
+/** A fetch that never answers: its promise rejects only when the request's signal aborts, as a browser's does. */
+function hangingFetch(p: Page) {
+  const w = p.window as unknown as { fetch: unknown; DOMException: typeof DOMException };
+  w.fetch = (url: string, init: Call['init'] & { signal?: AbortSignal }) => {
+    p.calls.push({ url, init });
+    return new Promise((_, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new w.DOMException('The operation was aborted.', 'AbortError')));
+    });
+  };
+}
+
+describe('js/form.js when /api/lead does not answer', () => {
+  it('aborts after 20 seconds and shows the network-failure error, with the button back and every answer kept', async () => {
+    // The reference: what the visitor sees when the request fails outright.
+    const down = await loadPage('', '', undefined, () => Promise.reject(new TypeError('Failed to fetch')));
+    const downForm = openForm(down);
+    fillValid(down, downForm);
+    submit(down, downForm);
+    await vi.waitFor(() => expect(submitError(downForm).textContent).toContain('something went wrong'));
+
+    const p = await loadPage();
+    const timers = handTimers(p);
+    hangingFetch(p);
+    const form = openForm(p);
+    fillValid(p, form);
+    const typed = answers(form);
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(1));
+    const signal = (p.calls[0]!.init as unknown as { signal: AbortSignal }).signal;
+    expect(signal.aborted).toBe(false);
+    expect(submitButton(form).disabled).toBe(true);
+    expect(submitButton(form).textContent).toBe('Submitting');
+    expect(timers.pending()).toEqual([20000]);
+
+    timers.fire(20000);
+    expect(signal.aborted).toBe(true);
+    await vi.waitFor(() => expect(submitError(form).textContent).toContain('something went wrong'));
+    expect(submitError(form).innerHTML).toBe(submitError(downForm).innerHTML);
+    expect(submitError(form).textContent).toBe('Sorry, something went wrong and your details were not sent. Please try again, or contact us at contact@tridha.net.');
+    expect(submitError(form).querySelector('a')?.getAttribute('href')).toBe('mailto:contact@tridha.net');
+    expect(submitButton(form).disabled).toBe(false);
+    expect(submitButton(form).textContent).toBe(submitButton(downForm).textContent);
+    expect(submitButton(form).textContent).toBe('Submit');
+    expect(answers(form)).toEqual(typed);
+    expect(draft(p)).toMatchObject({ fullName: 'Asha Rao', email: 'asha@acme-industries.com' });
+    expect(p.document.querySelector('.trd-thanks')).toBeNull();
+
+    // Not busy any more: pressing Submit again sends the same lead, and an answer this time is a success.
+    (p.window as unknown as { fetch: unknown }).fetch = (url: string, init: Call['init']) => {
+      p.calls.push({ url, init });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, leadId: 'x' }) });
+    };
+    submit(p, form);
+    await vi.waitFor(() => expect(p.document.querySelector('.trd-thanks')).not.toBeNull());
+    expect(p.calls).toHaveLength(2);
+    expect(JSON.parse(p.calls[1]!.init.body)).toEqual(JSON.parse(p.calls[0]!.init.body));
+    await vi.waitFor(() => expect(timers.pending()).toEqual([]));
+  });
+
+  it.each([
+    [200, { ok: true, leadId: 'x' }],
+    [500, { ok: false, error: 'write_failed' }],
+  ])('an answer (%i) inside 20 seconds clears the timer, so it can never abort a finished request', async (status, body) => {
+    const p = await loadPage('', '', { status, body });
+    const timers = handTimers(p);
+    const form = openForm(p);
+    fillValid(p, form);
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(1));
+    expect((p.calls[0]!.init as unknown as { signal: unknown }).signal).toBeInstanceOf(p.window.AbortSignal);
+    await vi.waitFor(() => expect(timers.pending()).toEqual([]));
+    if (status === 200) expect(p.document.querySelector('.trd-thanks')).not.toBeNull();
+    else expect(submitError(form).textContent).toContain('something went wrong');
+  });
+});
+
+describe('js/form.js keeps a draft of the answers for a reload in the same tab', () => {
+  it('saves each answer to sessionStorage as it is typed or picked, and never the honeypot', async () => {
+    const p = await loadPage();
+    const form = openForm(p);
+    expect(draft(p)).toBeNull();
+    setText(p, form, 'fullName', 'Asha Rao');
+    expect(draft(p)).toMatchObject({ fullName: 'Asha Rao', dial: '91', email: '', revenue: '', bottleneck: [] });
+    choose(form, 'revenue', 1);
+    choose(form, 'bottleneck', 0);
+    choose(form, 'bottleneck', 2);
+    const dial = form.querySelector('select') as HTMLSelectElement;
+    dial.value = '44';
+    dial.dispatchEvent(new p.window.Event('change', { bubbles: true }));
+    setText(p, form, 'trd_extra', 'bot-was-here');
+    const boxes = Array.from(form.querySelectorAll('input[name="bottleneck"]')) as HTMLInputElement[];
+    const revenue = (form.querySelectorAll('input[name="revenue"]')[1] as HTMLInputElement).value;
+    expect(draft(p)).toMatchObject({ fullName: 'Asha Rao', dial: '44', revenue, bottleneck: [boxes[0]!.value, boxes[2]!.value] });
+    expect(Object.keys(draft(p)!).sort()).toEqual([...FIELD_KEYS, 'dial'].sort());
+    expect(JSON.stringify(storageEntries(p))).not.toContain('bot-was-here');
+    // Emptying every answer drops the draft rather than storing a blank one.
+    setText(p, form, 'fullName', '');
+    choose(form, 'bottleneck', 0);
+    choose(form, 'bottleneck', 2);
+    expect(draft(p)).not.toBeNull();
+    (form.querySelectorAll('input[name="revenue"]')[1] as HTMLInputElement).checked = false;
+    form.dispatchEvent(new p.window.Event('change', { bubbles: true }));
+    expect(draft(p)).toBeNull();
+  });
+
+  it('saves the address the visitor picks from the typo hint', async () => {
+    const p = await loadPage();
+    const form = openForm(p);
+    fillValid(p, form);
+    setText(p, form, 'email', 'asha@gmial.com');
+    submit(p, form);
+    expect(draft(p)).toMatchObject({ email: 'asha@gmial.com' });
+    (form.querySelector('.trd-error .trd-suggest') as HTMLButtonElement).click();
+    expect(draft(p)).toMatchObject({ email: 'asha@gmail.com' });
+  });
+
+  it('restores every answer when the form is built after a reload, and the restored lead posts as typed', async () => {
+    const first = await loadPage();
+    const f1 = openForm(first);
+    fillValid(first, f1);
+    setText(first, f1, 'trd_extra', 'bot-was-here');
+    const typed = answers(f1);
+
+    const fresh = await loadPage();
+    expect(answers(openForm(fresh))).toEqual(EMPTY_ANSWERS);
+
+    const second = await loadPage('', '', undefined, undefined, { storage: storageEntries(first) });
+    const f2 = openForm(second);
+    expect(answers(f2)).toEqual(typed);
+    expect((f2.querySelector('input[name="trd_extra"]') as HTMLInputElement).value).toBe('');
+    // Two restored bottlenecks lock the other two, as when they are ticked by hand.
+    const boxes = Array.from(f2.querySelectorAll('input[name="bottleneck"]')) as HTMLInputElement[];
+    expect(boxes.map((b) => b.disabled)).toEqual([false, true, false, true]);
+    submit(second, f2);
+    await vi.waitFor(() => expect(second.calls).toHaveLength(1));
+    const body = JSON.parse(second.calls[0]!.init.body);
+    const parsed = leadSchema.safeParse(body);
+    expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
+    expect(body).toMatchObject({ fullName: typed.fullName, email: typed.email, company: typed.company, website: typed.website, company_website: '' });
+    // The restored number posts in the same E.164 form as when typed (trunk zero dropped, country code in front).
+    expect(body.phone).toBe(`+${typed.dial}${String(typed.phone).replace(/\D/g, '').replace(/^0+/, '')}`);
+    expect(body.bottleneck).toEqual(typed.bottleneck);
+  });
+
+  it('restores the country code with a partly filled form', async () => {
+    const first = await loadPage();
+    const f1 = openForm(first);
+    const dial = f1.querySelector('select') as HTMLSelectElement;
+    dial.value = '971';
+    dial.dispatchEvent(new first.window.Event('change', { bubbles: true }));
+    setText(first, f1, 'phone', '501234567');
+    const second = await loadPage('', '', undefined, undefined, { storage: storageEntries(first) });
+    const f2 = openForm(second);
+    expect(answers(f2)).toEqual({ ...EMPTY_ANSWERS, dial: '971', phone: '501234567' });
+  });
+
+  it('clears the draft once the lead is saved, so a reload after submitting starts empty', async () => {
+    const p = await loadPage();
+    const form = openForm(p);
+    fillValid(p, form);
+    expect(draft(p)).not.toBeNull();
+    submit(p, form);
+    await vi.waitFor(() => expect(p.document.querySelector('.trd-thanks')).not.toBeNull());
+    expect(draft(p)).toBeNull();
+    expect(storageEntries(p)).toHaveProperty('tridha_attribution');
+    const again = await loadPage('', '', undefined, undefined, { storage: storageEntries(p) });
+    expect(answers(openForm(again))).toEqual(EMPTY_ANSWERS);
+  });
+
+  it('keeps the draft when the lead is not saved', async () => {
+    const p = await loadPage('', '', { status: 500, body: { ok: false, error: 'write_failed' } });
+    const form = openForm(p);
+    fillValid(p, form);
+    submit(p, form);
+    await vi.waitFor(() => expect(submitError(form).textContent).toContain('something went wrong'));
+    expect(draft(p)).toMatchObject({ fullName: 'Asha Rao', company: 'Acme Industries' });
+  });
+
+  it('never stores the Turnstile token', async () => {
+    const TOKEN = 'TS-TOKEN-must-not-be-stored';
+    const p = await loadPage('', '', { status: 500, body: { ok: false, error: 'write_failed' } }, undefined, { turnstileSiteKey: 'test-site-key' });
+    const form = openForm(p);
+    const w = p.window as unknown as { turnstile: unknown; __trdTsReady: () => void };
+    w.turnstile = {
+      render: (_el: unknown, o: { callback: (t: string) => void }) => {
+        o.callback(TOKEN);
+        return 'widget-1';
+      },
+      reset: () => {},
+    };
+    w.__trdTsReady();
+    fillValid(p, form);
+    expect(JSON.stringify(storageEntries(p))).not.toContain(TOKEN);
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(1));
+    expect(JSON.parse(p.calls[0]!.init.body).turnstileToken).toBe(TOKEN);
+    await vi.waitFor(() => expect(submitError(form).textContent).toContain('something went wrong'));
+    expect(draft(p)).not.toBeNull();
+    expect(JSON.stringify(storageEntries(p))).not.toContain(TOKEN);
+  });
+
+  it.each([
+    ['sessionStorage throws on access', (w: JSDOM['window']) => {
+      Object.defineProperty(w, 'sessionStorage', { configurable: true, get() { throw new w.DOMException('The operation is insecure.', 'SecurityError'); } });
+    }],
+    ['every storage call throws', (w: JSDOM['window']) => {
+      for (const m of ['getItem', 'setItem', 'removeItem'] as const) {
+        w.Storage.prototype[m] = () => { throw new w.DOMException('The quota has been exceeded.', 'QuotaExceededError'); };
+      }
+    }],
+  ])('when %s, the form still opens, sends a complete lead and shows the thank-you', async (_name, breakStorage) => {
+    const p = await loadPage('', '', undefined, undefined, { before: breakStorage });
+    const form = openForm(p);
+    fillValid(p, form);
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(1));
+    const body = JSON.parse(p.calls[0]!.init.body);
+    const parsed = leadSchema.safeParse(body);
+    expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
+    expect(body.landingUrl).toBe('http://localhost/');
+    await vi.waitFor(() => expect(p.document.querySelector('.trd-thanks')).not.toBeNull());
+    expect(p.errors, 'no storage call escaped its guard').toEqual([]);
+  });
+
+  it.each([
+    ['not JSON', '{"fullName": "Asha'],
+    ['JSON null', 'null'],
+    ['a JSON string', '"Asha Rao"'],
+    ['an array', '["Asha Rao"]'],
+    ['wrong types and unknown options', JSON.stringify({ fullName: 42, email: ['a@b.co'], dial: '999', revenue: 'Not an option', bottleneck: 'not a list', techTeam: { x: 1 } })],
+  ])('a stored draft that is %s is ignored: the form opens empty and still sends', async (_name, raw) => {
+    const p = await loadPage('', '', undefined, undefined, { storage: { [DRAFT_KEY]: raw } });
+    const form = openForm(p);
+    expect(answers(form)).toEqual(EMPTY_ANSWERS);
+    fillValid(p, form);
+    submit(p, form);
+    await vi.waitFor(() => expect(p.document.querySelector('.trd-thanks')).not.toBeNull());
+    expect(draft(p)).toBeNull();
+    expect(p.errors).toEqual([]);
+  });
+
+  it('a stored draft cannot exceed a field limit or the two-bottleneck cap', async () => {
+    const first = await loadPage();
+    const options = Array.from(openForm(first).querySelectorAll('input[name="bottleneck"]')).map((b) => (b as HTMLInputElement).value);
+    const raw = JSON.stringify({ fullName: 'x'.repeat(500), phone: '9'.repeat(400), bottleneck: options });
+    const p = await loadPage('', '', undefined, undefined, { storage: { [DRAFT_KEY]: raw } });
+    const form = openForm(p);
+    const restored = answers(form);
+    expect((restored.fullName as string).length).toBe(120);
+    expect((restored.phone as string).length).toBe(254);
+    expect(restored.bottleneck).toEqual(options.slice(0, 2));
+    const boxes = Array.from(form.querySelectorAll('input[name="bottleneck"]')) as HTMLInputElement[];
+    expect(boxes.map((b) => b.disabled)).toEqual([false, false, true, true]);
   });
 });
 

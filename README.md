@@ -3,7 +3,7 @@
 Static landing page plus one Vercel serverless function that appends leads to a Google Sheet. It replaces the old GoHighLevel build, whose subscription lapsed. `archive/` holds what was captured from that build and is read-only reference.
 
 - `index.html`, `css/site.css`: the page, ported verbatim from the GHL custom-code block.
-- `css/form.css`, `js/form.js`: the lead modal (all 12 questions on one scrolling form, never navigates; the calendar or thank-you replaces the card in place).
+- `css/form.css`, `js/form.js`: the lead modal (all 12 questions on one scrolling form, never navigates; the calendar or thank-you replaces the card in place). A submit with no answer in 20 seconds is aborted and shown like a network failure (the generic error with `FALLBACK_CONTACT`, every answer kept). Answers in progress are kept in `sessionStorage` (`trd-lead-draft-v1`, so only for that tab) to survive a reload, and dropped once the lead is saved; the honeypot and the Turnstile token are never stored.
 - `js/config.js`: all owner-editable settings (thank-you text, fallback contact, Cal.com link, ad IDs, Turnstile key).
 - `js/track.js`: ad tags, loaded after `window.load` and only when their ID is set.
 - `js/booking.js`, `book.html`: the Cal.com inline booking embed, used by the modal and by `/book` (see Cal.com booking).

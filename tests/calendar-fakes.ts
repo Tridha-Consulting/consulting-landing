@@ -48,6 +48,10 @@ interface FakeState {
   tokenCalls: number;
   failList: boolean;
   failWatch: boolean;
+  /** Make reads (GET) of the Leads tab fail with a 500, leaving appends and updates working. */
+  failLeadReads: boolean;
+  /** While set, an append to the Leads tab waits for this promise before it is stored and answered. */
+  appendGate: Promise<void> | null;
 }
 
 export const fake: FakeState = (globalThis as { __calendarFake?: FakeState }).__calendarFake ??= {
@@ -69,6 +73,8 @@ export const fake: FakeState = (globalThis as { __calendarFake?: FakeState }).__
   tokenCalls: 0,
   failList: false,
   failWatch: false,
+  failLeadReads: false,
+  appendGate: null,
 };
 
 export function resetFakes(): void {
@@ -86,6 +92,8 @@ export function resetFakes(): void {
   fake.tokenCalls = 0;
   fake.failList = false;
   fake.failWatch = false;
+  fake.failLeadReads = false;
+  fake.appendGate = null;
 }
 
 /** The Events tab's name as the code under test resolves it. */
@@ -126,17 +134,24 @@ function eventsAppend(c: Call): Response {
 }
 
 function sheets(c: Call): Response {
-  if (fake.failSheets) return new Response('{"error":{"message":"boom"}}', { status: 500 });
+  if (fake.failSheets || (fake.failLeadReads && c.method === 'GET')) return new Response('{"error":{"message":"boom"}}', { status: 500 });
   const path = decodeURIComponent(c.url.pathname);
   const prefix = `/v4/spreadsheets/${SHEET_ID}`;
   if (!path.startsWith(prefix)) throw new Error(`unexpected sheets path ${path}`);
   const rest = path.slice(prefix.length);
   if (c.method === 'GET' && rest.startsWith('/values/')) {
-    // Like Sheets, return only the columns of the requested range (A:<last>), so a column added to
-    // the right of ours is never seen by the code under test.
-    const last = /!A:([A-Z]+)$/.exec(rest)?.[1];
-    const width = last ? letterToIndex(last) + 1 : Infinity;
-    return Response.json({ range: rest, majorDimension: 'ROWS', values: trimmed(fake.sheet.map((r) => r.slice(0, width))) });
+    // Like Sheets, return only the cells of the requested range (A:<last>, one column <col>:<col>, or one row
+    // A<n>:<last><n>), so a column added to the right of ours is never seen by the code under test.
+    // majorDimension=COLUMNS answers column by column, each with its trailing empty cells trimmed.
+    const m = /!([A-Z]+)(\d*):([A-Z]+)(\d*)$/.exec(rest);
+    if (!m) return Response.json({ range: rest, majorDimension: 'ROWS', values: trimmed(fake.sheet) });
+    const [c1, c2] = [letterToIndex(m[1]!), letterToIndex(m[3]!)];
+    const rows = fake.sheet.slice(m[2] ? Number(m[2]) - 1 : 0, m[4] ? Number(m[4]) : undefined).map((r) => r.slice(c1, c2 + 1));
+    if (c.url.searchParams.get('majorDimension') === 'COLUMNS') {
+      const columns = Array.from({ length: c2 - c1 + 1 }, (_, j) => rows.map((r) => r[j] ?? ''));
+      return Response.json({ range: rest, majorDimension: 'COLUMNS', values: trimmed(columns) });
+    }
+    return Response.json({ range: rest, majorDimension: 'ROWS', values: trimmed(rows) });
   }
   if (c.method === 'POST' && rest === '/values:batchUpdate') {
     const { valueInputOption, data } = c.body as { valueInputOption: string; data: { range: string; values: string[][] }[] };
@@ -191,6 +206,10 @@ export async function fakeFetch(input: unknown, init?: RequestInit): Promise<Res
       return fake.hangEvents ? new Promise<Response>(() => {}) : eventsAppend(call);
     }
     fake.sheetCalls.push(call);
+    if (fake.appendGate && call.method === 'POST' && /:append$/.test(url.pathname)) {
+      const gate = fake.appendGate;
+      return gate.then(() => sheets(call));
+    }
     return sheets(call);
   }
   if (url.hostname === 'www.googleapis.com') {

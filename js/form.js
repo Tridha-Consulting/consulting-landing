@@ -9,6 +9,7 @@
   var EMAIL_ENDPOINT = '/api/lead-email';
   var ATTR_KEY = 'tridha_attribution';
   var DRAFT_KEY = 'trd-lead-draft-v1';
+  var LEAD_ID_KEY = 'trd-lead-id-v1';
   var ATTR_PARAMS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid', 'gclid', 'li_fat_id', 'twclid', 'gbraid', 'wbraid'];
 
   /* Same rule names as lib/schema.ts (fullName, email, phone, designation, company, website, attribution).
@@ -92,6 +93,53 @@
   }
   function storeDel(key) {
     try { window.sessionStorage.removeItem(key); } catch (e) { /* ignore */ }
+  }
+
+  /* ---------- the submission's Lead ID ---------- */
+  /* The form proposes the Lead ID (a random UUID v4) and sends the same one with every attempt of one set of
+     answers, so /api/lead stores the lead once however many attempts reach it: an attempt aborted at 20 seconds
+     may still have been saved, and the retry is then answered from it. The id is kept in sessionStorage with a
+     hash of the answers it was made for, so a reload of the tab reuses it; a change to any answer as sent (the
+     12 answers, the phone as normalised) makes a new id, and a saved lead drops it. memLeadId stands in when
+     storage throws. Without crypto.getRandomValues no id is sent and the server makes one, as before. */
+  var memLeadId = null;
+  var LEAD_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+  function newLeadId() {
+    var c = window.crypto;
+    try { if (c && typeof c.randomUUID === 'function') return c.randomUUID(); } catch (e) { /* insecure context: build one below */ }
+    if (!c || typeof c.getRandomValues !== 'function') return '';
+    var b = new Uint8Array(16);
+    c.getRandomValues(b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    var h = '';
+    for (var i = 0; i < 16; i++) h += (b[i] < 16 ? '0' : '') + b[i].toString(16);
+    return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
+  }
+
+  /* 32-bit FNV-1a of the answers as sent: enough to tell whether they changed, without a second stored copy of them. */
+  function answersHash(body) {
+    var s = JSON.stringify(FIELD_ORDER.map(function (k) { return body[k]; }));
+    var h = 0x811c9dc5;
+    for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+    return h.toString(16);
+  }
+
+  /* The id to send with these answers: the held one while they are unchanged, else a new one. */
+  function leadIdFor(body) {
+    var hash = answersHash(body), held = memLeadId;
+    try { held = JSON.parse(storeGet(LEAD_ID_KEY) || 'null') || memLeadId; } catch (e) { /* keep memLeadId */ }
+    if (held && held.hash === hash && LEAD_ID_SHAPE.test(String(held.id))) return held.id;
+    var id = newLeadId();
+    memLeadId = LEAD_ID_SHAPE.test(id) ? { id: id, hash: hash } : null;
+    if (memLeadId) storeSet(LEAD_ID_KEY, JSON.stringify(memLeadId)); else storeDel(LEAD_ID_KEY);
+    return memLeadId ? id : '';
+  }
+
+  function dropLeadId() {
+    memLeadId = null;
+    storeDel(LEAD_ID_KEY);
   }
 
   /* Control characters are dropped: each JSON-escapes to six bytes, so a crafted link could push the
@@ -579,6 +627,8 @@
         body[k] = k === 'phone' ? normalisePhone(inputs.dial.value, inputs.phone.value) : answer(k);
       });
       body.company_website = inputs.hp.value;
+      var leadId = leadIdFor(body);
+      if (leadId) body.leadId = leadId;
       if (token) body.turnstileToken = token;
       timer = ctl ? setTimeout(function () { try { ctl.abort(); } catch (e) { /* ignore */ } }, SUBMIT_TIMEOUT_MS) : null;
       return fetch(ENDPOINT, {
@@ -821,6 +871,7 @@
     sent = true;
     busy = false;
     storeDel(DRAFT_KEY);
+    dropLeadId();
     card.removeChild(form);
     /* The form was long: the next state (email fix, calendar or thank-you) starts at the top of the overlay. */
     overlay.scrollTop = 0;

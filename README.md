@@ -11,7 +11,7 @@ Static landing page plus one Vercel serverless function that appends leads to a 
 - `api/calendar-notify.ts`, `api/calendar-cron.ts`: flag a booker who declines the Google invite (see "Google Calendar declines"). `lib/calendar-sync.ts` (decision + Status write), `lib/calendar-client.ts` (read-only Calendar API), `lib/calendar-env.ts`.
 - `lib/channel.ts` (`classifyChannel`, pure: which marketing channel a lead came from), `lib/event-log.ts` (best-effort audit rows on the Events tab).
 - `api/lead-email.ts`: corrects the email of a lead whose domain has no mail server (see "Email check"). `lib/email-domain.ts` (the MX lookup), `lib/email-sheet.ts` (the guarded Sheet update), `lib/fix-token.ts` (the correction credential), `lib/http.ts` (request helpers shared by the two lead endpoints).
-- `api/lead.ts`: the endpoint. `lib/schema.ts` (zod, single source of truth, including the answer option lists), `lib/columns.ts` (sheet layout), `lib/sinks/` (where leads go), `lib/env.ts` (fails loudly on missing env).
+- `api/lead.ts`: the endpoint. `lib/schema.ts` (zod, single source of truth, including the answer option lists), `lib/columns.ts` (sheet layout), `lib/sinks/` (where leads go), `lib/lead-dedupe.ts` + `lib/lead-lookup.ts` (one row per submission, see "Duplicate submissions"), `lib/env.ts` (fails loudly on missing env).
 
 ## Local development
 
@@ -45,6 +45,19 @@ npm run dev         # vercel dev: serves the page and /api/lead
 |---|---|---|
 | `LEAD_RATE_LIMIT` | no | submissions per IP per window; defaults to `5`. A non-positive or non-integer value is ignored |
 | `LEAD_RATE_WINDOW_SEC` | no | window length in seconds; defaults to `600`. A non-positive or non-integer value is ignored |
+
+### Duplicate submissions
+
+The form aborts a `/api/lead` request that has not answered within 20 seconds, but the request can still finish on the server and save the lead; the visitor's retry must not add a second row. So the browser proposes the Lead ID, and the server stores one submission once (`lib/lead-dedupe.ts`, `lib/lead-lookup.ts`):
+
+- **The id.** `js/form.js` makes a random UUID v4 (`crypto.randomUUID`, else built from `crypto.getRandomValues`) and sends it as `leadId` with the first attempt and every retry of the same answers. It is kept in `sessionStorage` (`trd-lead-id-v1`) with a hash of the 12 answers as sent (the phone as normalised), never the answers themselves, so a reload of the tab keeps it. A change to any answer as sent makes a new id: changed answers are a new submission with a row of their own, and only the latest answers keep their id. A saved lead drops the id along with the draft. A browser with neither crypto call sends no id, and the server makes one as before.
+- **The server.** `/api/lead` takes `leadId` only when it is a lowercase UUID v4; anything else is ignored and the server makes the id. Every attempt still passes the honeypot, the rate limit (a retry counts), Turnstile (the form resets the widget after a failure, so a retry carries a fresh token) and validation. A request is the same submission as an earlier one when it carries the same id and the same Email (ignoring case) and Phone. Then:
+  1. On the same serverless instance, a retry that arrives while the first attempt is still running waits for it and gets its answer, success or failure; one that arrives within 15 minutes of a success gets that answer without reading the Sheet. Logged as `LEAD_RETRY_JOINED` (id and status). A failed attempt is forgotten as soon as it answers, so the next retry writes again.
+  2. Otherwise the server reads the Lead ID column (that one column, beside the MX lookup, under a 4 second deadline) and on a match that one row. A match by the same submitter is answered from the row and nothing is appended or added to the Events tab (`LEAD_RETRY_REPLAYED`, id and row number).
+  The answer is the one the first attempt gave, `{ ok, leadId, emailOk }` and the same `fixToken` while the row's Email Check is `No mail server`, so the email step and the Cal embed get the stored lead's id. `track.lead()` (the X lead conversion included) fires on the one success the browser sees, so once per lead.
+- **An id held by someone else.** When the row or the running attempt with that id has a different Email or Phone, the request is never answered from it: the lead is stored under a fresh server id (`LEAD_ID_CONFLICT`, ids and row only). Knowing a lead id is not enough to read back that lead's answer or its fix token. A row whose Email or Phone was edited by hand, or corrected through `/api/lead-email`, no longer matches a late retry of the original answers, which is then stored as a new row.
+- **A failed check.** If the lookup fails or times out, or the row found moved before it was read (the sheet was sorted in between), the lead is appended anyway (`LEAD_DEDUPE_CHECK_FAILED`, id and error only): a possible duplicate costs less than a lost lead.
+- **The race that remains.** The wait in step 1 is per instance. A retry that reaches a *different* instance while the first attempt is still running there, before it has appended its row, finds nothing in the Sheet and appends a second row. Both rows carry the same Lead ID; the Cal.com webhook, the email correction and this lookup all use the upper one, so delete the lower one by hand. A retry usually lands seconds later on the same warm instance, but nothing guarantees it; closing this needs a store shared by all instances (or a lock in the Sheet), which the site does not have.
 
 ## Google Sheet setup
 

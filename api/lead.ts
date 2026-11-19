@@ -5,7 +5,9 @@ import { EVENT_LOG_DEADLINE_MS, logEvents } from '../lib/event-log.js';
 import { fixTokenFor } from '../lib/fix-token.js';
 import { BodyError, clientIp, json, methodNotAllowed, readJsonObject } from '../lib/http.js';
 import { checkLeadRate } from '../lib/rate-limit.js';
-import { leadSchema } from '../lib/schema.js';
+import { recentLeads, proposedLeadId, submitterKey, type Claim, type LeadReply } from '../lib/lead-dedupe.js';
+import type { StoredLead } from '../lib/lead-lookup.js';
+import { leadSchema, type LeadInput } from '../lib/schema.js';
 import { STATUS, type LeadRow } from '../lib/columns.js';
 import type { LeadSink } from '../lib/sinks/index.js';
 
@@ -105,21 +107,84 @@ export async function POST(request: Request): Promise<Response> {
     return json(400, { ok: false, error: 'validation_failed', fields });
   }
 
+  // The Lead ID the browser proposed for this submission; its retries carry the same one. A retry by the same
+  // submitter is answered from the attempt already running or answered on this instance, else from the row
+  // the Sheet holds, and appends nothing (lib/lead-dedupe.ts, README "Duplicate submissions").
+  const proposed = proposedLeadId(body.leadId);
+  let claim: Claim | undefined = proposed ? recentLeads.claim(proposed, submitterKey(parsed.data)) : undefined;
+  if (claim?.kind === 'join') {
+    const reply = await claim.reply;
+    console.log(JSON.stringify({ event: 'LEAD_RETRY_JOINED', leadId: proposed, status: reply.status }));
+    return json(reply.status, reply.body);
+  }
+  if (claim?.kind === 'conflict') {
+    // Another submitter holds this id here: this lead gets an id of its own.
+    console.error(JSON.stringify({ event: 'LEAD_ID_CONFLICT', leadId: proposed }));
+    claim = undefined;
+  }
+  let reply: LeadReply = { status: 500, body: { ok: false, error: 'internal_error' } };
+  try {
+    reply = await storeLead(request, parsed.data, ip, claim ? proposed : undefined);
+    return json(reply.status, reply.body);
+  } finally {
+    // Always settled, so a retry waiting on this attempt is never left hanging.
+    claim?.settle(reply);
+  }
+}
+
+/** The stored lead with this id, or null; a lookup that fails is logged and treated as none, so it never costs a lead its row. */
+async function storedLead(leadId: string): Promise<StoredLead | null> {
+  try {
+    const { findLead } = await import('../lib/lead-lookup.js');
+    return await findLead(leadId);
+  } catch (err) {
+    console.error(JSON.stringify({ event: 'LEAD_DEDUPE_CHECK_FAILED', leadId, error: err instanceof Error ? err.message : String(err) }));
+    return null;
+  }
+}
+
+/** The success answer for a stored lead, the same whether it was written now or by an earlier attempt. */
+function stored(leadId: string, emailCheck: string): LeadReply {
+  const emailOk = emailCheck !== EMAIL_CHECK.noMailServer;
+  if (emailOk) return { status: 200, body: { ok: true, leadId, emailOk } };
+  // The token that lets the form correct this row's email (/api/lead-email). Without CRON_SECRET the lead is
+  // still saved and the form skips the correction step.
+  const fixToken = fixTokenFor(leadId);
+  if (!fixToken) console.error(JSON.stringify({ event: 'LEAD_FIX_TOKEN_UNAVAILABLE', leadId, error: 'Missing environment variable: CRON_SECRET' }));
+  return { status: 200, body: { ok: true, leadId, emailOk, ...(fixToken && { fixToken }) } };
+}
+
+/**
+ * Appends the lead, or answers from the row an earlier attempt of the same submission wrote. `proposed` is the
+ * browser's id when this request owns it; without one the lead gets a fresh id and no lookup is needed.
+ */
+async function storeLead(request: Request, data: LeadInput, ip: string, proposed: string | undefined): Promise<LeadReply> {
   let sinks: LeadSink[];
   try {
     ({ sinks } = await import('../lib/sinks/index.js'));
   } catch (err) {
     // Missing env fails module load. Never report success when nothing can store the lead.
     console.error(JSON.stringify({ event: 'LEAD_SINK_MISCONFIGURED', error: err instanceof Error ? err.message : String(err) }));
-    return json(500, { ok: false, error: 'server_misconfigured' });
+    return { status: 500, body: { ok: false, error: 'server_misconfigured' } };
   }
 
-  // A domain with no mail server still gets its row; the form then asks for a corrected address.
-  const emailCheck = await checkEmailDomain(parsed.data.email);
+  // A domain with no mail server still gets its row; the form then asks for a corrected address. The lookup
+  // runs beside the MX check, so it adds time only when it is the slower of the two.
+  const [emailCheck, earlier] = await Promise.all([checkEmailDomain(data.email), proposed ? storedLead(proposed) : null]);
+  let leadId = proposed ?? randomUUID();
+  if (earlier) {
+    if (submitterKey(earlier) === submitterKey(data)) {
+      console.log(JSON.stringify({ event: 'LEAD_RETRY_REPLAYED', leadId, row: earlier.row }));
+      return stored(leadId, earlier.emailCheck);
+    }
+    // The row with this id belongs to someone else: never answer from it, store this lead under its own id.
+    console.error(JSON.stringify({ event: 'LEAD_ID_CONFLICT', leadId, row: earlier.row }));
+    leadId = randomUUID();
+  }
 
   const lead: LeadRow = {
-    ...parsed.data,
-    leadId: randomUUID(),
+    ...data,
+    leadId,
     submittedAt: new Date(),
     userAgent: (request.headers.get('user-agent') ?? '').slice(0, 500),
     ip,
@@ -138,7 +203,7 @@ export async function POST(request: Request): Promise<Response> {
     console.error(JSON.stringify({ event: 'LEAD_WRITE_FAILED', sink: sinks[i]?.name, error, lead }));
   });
 
-  if (written === 0) return json(502, { ok: false, error: 'write_failed' });
+  if (written === 0) return { status: 502, body: { ok: false, error: 'write_failed' } };
 
   console.log(JSON.stringify({ event: 'LEAD_WRITTEN', leadId: lead.leadId, emailCheck }));
   // Best-effort audit row after the lead is stored; logEvents never throws, so the response is unchanged,
@@ -146,14 +211,9 @@ export async function POST(request: Request): Promise<Response> {
   await logEvents([{ event: 'Lead submitted', source: 'form', leadId: lead.leadId, statusTo: STATUS.new, detail: classifyChannel(lead) }], {
     deadlineMs: EVENT_LOG_DEADLINE_MS,
   });
-  const emailOk = emailCheck !== EMAIL_CHECK.noMailServer;
-  if (emailOk) return json(200, { ok: true, leadId: lead.leadId, emailOk });
-  // The token that lets the form correct this row's email (/api/lead-email). Without CRON_SECRET the lead is
-  // still saved and the form skips the correction step.
-  const fixToken = fixTokenFor(lead.leadId);
-  if (!fixToken) console.error(JSON.stringify({ event: 'LEAD_FIX_TOKEN_UNAVAILABLE', leadId: lead.leadId, error: 'Missing environment variable: CRON_SECRET' }));
-  return json(200, { ok: true, leadId: lead.leadId, emailOk, ...(fixToken && { fixToken }) });
+  return stored(lead.leadId, emailCheck);
 }
+
 
 export const GET = methodNotAllowed;
 export const HEAD = methodNotAllowed;

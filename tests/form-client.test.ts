@@ -517,6 +517,152 @@ describe('js/form.js when /api/lead does not answer', () => {
   });
 });
 
+const LEAD_ID_KEY = 'trd-lead-id-v1';
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const leadIdOf = (call: Call): unknown => (JSON.parse(call.init.body) as Record<string, unknown>).leadId;
+
+/** Answers /api/lead the way the server does for a proposed id: success under that id. */
+function answerWithProposedId(p: Page) {
+  (p.window as unknown as { fetch: unknown }).fetch = (url: string, init: Call['init']) => {
+    p.calls.push({ url, init });
+    const leadId = leadIdOf({ url, init });
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, leadId, emailOk: true }) });
+  };
+}
+
+/** Runs js/track.js on the page with the X pixel stubbed, so the lead conversion it fires can be counted. */
+function trackX(p: Page): ReturnType<typeof vi.fn> {
+  const twq = vi.fn();
+  (p.window as unknown as { twq: unknown }).twq = twq;
+  p.window.eval(read('js/track.js'));
+  return twq;
+}
+
+describe('js/form.js proposes one Lead ID per submission, kept across retries', () => {
+  it('a timeout then a retry sends the same id; the calendar gets it and X counts one lead', async () => {
+    const p = await loadPage('', 'tridha-consulting/exploration-call');
+    const booking = (p.window as unknown as { trdBooking: { mount: unknown } }).trdBooking;
+    const prefills: Record<string, string>[] = [];
+    booking.mount = (_host: unknown, prefill: Record<string, string>) => { prefills.push(prefill); return true; };
+    const twq = trackX(p);
+    const timers = handTimers(p);
+    hangingFetch(p);
+    const form = openForm(p);
+    fillValid(p, form);
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(1));
+    const id = leadIdOf(p.calls[0]!);
+    expect(id).toMatch(UUID_V4);
+    timers.fire(20000);
+    await vi.waitFor(() => expect(submitError(form).textContent).toContain('something went wrong'));
+    expect(twq).not.toHaveBeenCalled();
+    // The aborted attempt may have been saved: the retry must name the same submission.
+    answerWithProposedId(p);
+    submit(p, form);
+    await vi.waitFor(() => expect(prefills).toHaveLength(1));
+    expect(p.calls).toHaveLength(2);
+    expect(leadIdOf(p.calls[1]!)).toBe(id);
+    expect(prefills[0]!.leadId).toBe(id);
+    expect(twq.mock.calls).toEqual([['event', 'tw-re613-re62p', {}]]);
+    // Saved: the id is dropped with the draft, so the next submission in this tab gets a new one.
+    expect(storageEntries(p)).not.toHaveProperty(LEAD_ID_KEY);
+    expect(storageEntries(p)).not.toHaveProperty(DRAFT_KEY);
+  });
+
+  it('a reload between the failed attempt and the retry keeps the id, with the restored answers', async () => {
+    const first = await loadPage('', '', undefined, () => Promise.reject(new TypeError('Failed to fetch')));
+    const form = openForm(first);
+    fillValid(first, form);
+    submit(first, form);
+    await vi.waitFor(() => expect(submitError(form).textContent).toContain('something went wrong'));
+    const id = leadIdOf(first.calls[0]!);
+    const stored = JSON.parse(storageEntries(first)[LEAD_ID_KEY]!) as Record<string, unknown>;
+    expect(stored.id).toBe(id);
+    // A hash of the answers, never the answers themselves.
+    expect(Object.keys(stored).sort()).toEqual(['hash', 'id']);
+    expect(JSON.stringify(stored)).not.toContain('Asha');
+
+    const second = await loadPage('', '', undefined, undefined, { storage: storageEntries(first) });
+    const again = openForm(second);
+    submit(second, again);
+    await vi.waitFor(() => expect(second.calls).toHaveLength(1));
+    expect(leadIdOf(second.calls[0]!)).toBe(id);
+  });
+
+  it('a changed answer is a new submission with a new id; only the latest answers keep theirs', async () => {
+    const p = await loadPage('', '', undefined, () => Promise.reject(new TypeError('Failed to fetch')));
+    const form = openForm(p);
+    fillValid(p, form);
+    const sendNow = async () => {
+      const n = p.calls.length;
+      submit(p, form);
+      await vi.waitFor(() => expect(p.calls).toHaveLength(n + 1));
+      await vi.waitFor(() => expect(submitButton(form).disabled).toBe(false));
+      return leadIdOf(p.calls[n]!);
+    };
+    const a = await sendNow();
+    expect(await sendNow()).toBe(a);
+    choose(form, 'timeline', 1);
+    const b = await sendNow();
+    expect(b).toMatch(UUID_V4);
+    expect(b).not.toBe(a);
+    setText(p, form, 'phone', '+91 98765 43210');
+    // The phone as sent is unchanged (the same number in another shape), so the id is too.
+    expect(await sendNow()).toBe(b);
+    // Changing it back is a third submission: one id is held, for the answers last sent.
+    choose(form, 'timeline', 0);
+    const c = await sendNow();
+    expect(c).toMatch(UUID_V4);
+    expect([a, b]).not.toContain(c);
+  });
+
+  it('works with sessionStorage throwing: the id lives in memory for the open page', async () => {
+    const p = await loadPage('', '', undefined, () => Promise.reject(new TypeError('Failed to fetch')), {
+      before: (w) => {
+        Object.defineProperty(w, 'sessionStorage', { get() { throw new Error('denied'); } });
+      },
+    });
+    const form = openForm(p);
+    fillValid(p, form);
+    submit(p, form);
+    await vi.waitFor(() => expect(submitError(form).textContent).toContain('something went wrong'));
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(2));
+    expect(leadIdOf(p.calls[0]!)).toMatch(UUID_V4);
+    expect(leadIdOf(p.calls[1]!)).toBe(leadIdOf(p.calls[0]!));
+  });
+
+  it('builds a UUID v4 from getRandomValues where randomUUID is missing, and sends no id without either', async () => {
+    const fallback = await loadPage('', '', undefined, undefined, {
+      before: (w) => { Object.defineProperty(w.crypto, 'randomUUID', { value: undefined }); },
+    });
+    const form = openForm(fallback);
+    fillValid(fallback, form);
+    submit(fallback, form);
+    await vi.waitFor(() => expect(fallback.calls).toHaveLength(1));
+    expect(leadIdOf(fallback.calls[0]!)).toMatch(UUID_V4);
+
+    const none = await loadPage('', '', undefined, undefined, {
+      before: (w) => { Object.defineProperty(w, 'crypto', { value: undefined }); },
+    });
+    const bare = openForm(none);
+    fillValid(none, bare);
+    submit(none, bare);
+    await vi.waitFor(() => expect(none.calls).toHaveLength(1));
+    expect(JSON.parse(none.calls[0]!.init.body)).not.toHaveProperty('leadId');
+    await vi.waitFor(() => expect(none.document.querySelector('.trd-thanks')).not.toBeNull());
+  });
+
+  it('a stored id that is not a UUID v4 is replaced, never sent', async () => {
+    const p = await loadPage('', '', undefined, undefined, { storage: { [LEAD_ID_KEY]: JSON.stringify({ id: 'Lead ID', hash: 'anything' }) } });
+    const form = openForm(p);
+    fillValid(p, form);
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(1));
+    expect(leadIdOf(p.calls[0]!)).toMatch(UUID_V4);
+  });
+});
+
 describe('js/form.js keeps a draft of the answers for a reload in the same tab', () => {
   it('saves each answer to sessionStorage as it is typed or picked, and never the honeypot', async () => {
     const p = await loadPage();

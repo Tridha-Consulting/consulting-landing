@@ -1,22 +1,4 @@
-import { getExampleNumber } from 'libphonenumber-js/max';
-import mobileExamples from 'libphonenumber-js/mobile/examples';
 import { BOTTLENECK_OPTIONS, BUDGET_OPTIONS, DECISION_MAKER_OPTIONS, REVENUE_OPTIONS, TECH_TEAM_OPTIONS, TIMELINE_OPTIONS } from '../lib/schema.js';
-
-/**
- * libphonenumber's example Indian mobile, its 10 national digits. The phone tests type it in each shape
- * with phoneShape instead of writing an Indian mobile with +91 or a trunk 0 into a test, which the commit
- * guard refuses as a personal phone number.
- */
-export const IN_MOBILE: string = getExampleNumber('IN', mobileExamples)!.nationalNumber;
-if (!/^[6-9]\d{9}$/.test(IN_MOBILE)) throw new Error('libphonenumber example for IN is not a 10-digit mobile');
-
-/** The shape with each # replaced by the next digit of `digits`: phoneShape('+91 ##### #####'). */
-export function phoneShape(shape: string, digits: string = IN_MOBILE): string {
-  let i = 0;
-  const typed = shape.replace(/#/g, () => digits.charAt(i++));
-  if (i !== digits.length) throw new Error(`${shape} has ${i} digit slots for ${digits.length} digits`);
-  return typed;
-}
 
 export const validBody = {
   fullName: 'Asha Rao',

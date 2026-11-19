@@ -5,7 +5,6 @@ import { JSDOM } from 'jsdom';
 import { describe, expect, it, vi } from 'vitest';
 import { classifyChannel } from '../lib/channel.js';
 import { leadSchema } from '../lib/schema.js';
-import { IN_MOBILE, phoneShape } from './helpers.js';
 
 /**
  * Executes the page's own js/form.js in jsdom (no remote URL is ever loaded) and drives the real
@@ -262,30 +261,30 @@ describe('js/form.js in jsdom', () => {
   });
 
   /* The phone rules through the real form: [dropdown, typed, posted]. Every posted lead also passes the server schema.
-     The Indian mobile is libphonenumber's example, typed in each shape (see phoneShape). */
-  const IN_STORED = `+91${IN_MOBILE}`;
+     The Indian mobiles are fictitious (98765 43210 and runs of consecutive digits), typed in each shape. */
+  const IN_STORED = '+919876543210';
   it.each([
-    ['91', phoneShape('##########'), IN_STORED, 'a plain 10-digit mobile'],
-    ['91', phoneShape('0##### #####'), IN_STORED, 'the trunk 0 dropped'],
-    ['91', phoneShape('91##########'), IN_STORED, '91 in front, no +'],
-    ['91', phoneShape('+91 ##### #####'), IN_STORED, '+91 with spaces'],
-    ['91', phoneShape('+91-#####-#####'), IN_STORED, '+91 with dashes'],
-    ['91', phoneShape('(+91) ##### #####'), IN_STORED, '+91 in parentheses'],
-    ['91', phoneShape('0091 ##########'), IN_STORED, '0091, the international prefix and the code for India'],
-    ['91', phoneShape('00##########'), IN_STORED, '00 before a mobile with India selected: a trunk 0 typed twice'],
-    ['91', phoneShape('0 0 ##### #####'), IN_STORED, '"0 0", the two zeros spaced apart'],
-    ['91', phoneShape('000 ##### #####'), IN_STORED, 'three zeros, all trunk zeros'],
-    ['91', phoneShape('#####.#####'), IN_STORED, 'dots'],
-    ['91', phoneShape('‪##### #####‬'), IN_STORED, 'pasted from a phone, wrapped in invisible direction marks'],
-    ['91', phoneShape('‪+91 ##### #####‬'), IN_STORED, '+91, pasted from a phone'],
-    ['91', phoneShape('‎##########'), IN_STORED, 'a left-to-right mark in front'],
-    ['91', phoneShape('#####​#####'), IN_STORED, 'a zero-width space inside'],
-    ['91', phoneShape('##########', `6${IN_MOBILE.slice(1)}`), `+916${IN_MOBILE.slice(1)}`, 'a mobile starting 6'],
-    ['91', phoneShape('##########', `7${IN_MOBILE.slice(1)}`), `+917${IN_MOBILE.slice(1)}`, 'a mobile starting 7'],
-    ['91', phoneShape('##########', `9${IN_MOBILE.slice(1)}`), `+919${IN_MOBILE.slice(1)}`, 'a mobile starting 9'],
+    ['91', '9876543210', IN_STORED, 'a plain 10-digit mobile'],
+    ['91', '098765 43210', IN_STORED, 'the trunk 0 dropped'],
+    ['91', '919876543210', IN_STORED, '91 in front, no +'],
+    ['91', '+91 98765 43210', IN_STORED, '+91 with spaces'],
+    ['91', '+91-98765-43210', IN_STORED, '+91 with dashes'],
+    ['91', '(+91) 98765 43210', IN_STORED, '+91 in parentheses'],
+    ['91', '0091 9876543210', IN_STORED, '0091, the international prefix and the code for India'],
+    ['91', '009876543210', IN_STORED, '00 before a mobile with India selected: a trunk 0 typed twice'],
+    ['91', '0 0 98765 43210', IN_STORED, '"0 0", the two zeros spaced apart'],
+    ['91', '000 98765 43210', IN_STORED, 'three zeros, all trunk zeros'],
+    ['91', '98765.43210', IN_STORED, 'dots'],
+    ['91', '‪98765 43210‬', IN_STORED, 'pasted from a phone, wrapped in invisible direction marks'],
+    ['91', '‪+91 98765 43210‬', IN_STORED, '+91, pasted from a phone'],
+    ['91', '‎9876543210', IN_STORED, 'a left-to-right mark in front'],
+    ['91', '98765​43210', IN_STORED, 'a zero-width space inside'],
+    ['91', '6789012345', '+916789012345', 'a mobile starting 6'],
+    ['91', '7890123456', '+917890123456', 'a mobile starting 7'],
+    ['91', '8901234567', '+918901234567', 'a mobile starting 8'],
     ['91', '+971 50 123 4567', '+971501234567', 'a typed UAE code wins over the India dropdown'],
     ['91', '+44 7911 123456', '+447911123456', 'a typed UK code wins over the India dropdown'],
-    ['44', phoneShape('+91 ##### #####'), IN_STORED, 'a typed +91 wins over the UK dropdown'],
+    ['44', '+91 98765 43210', IN_STORED, 'a typed +91 wins over the UK dropdown'],
     ['44', '00971501234567', '+971501234567', 'with the UK dropdown 00 is still the international prefix'],
     ['971', '050 123 4567', '+971501234567', 'the UAE dropdown, trunk 0 dropped'],
     ['39', '06 1234 5678', '+390612345678', 'the Italy dropdown keeps the 0'],

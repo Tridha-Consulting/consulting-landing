@@ -15,7 +15,7 @@ import {
   TIMELINE_OPTIONS,
   leadSchema,
 } from '../lib/schema.js';
-import { IN_MOBILE, phoneShape, validBody } from './helpers.js';
+import { validBody } from './helpers.js';
 
 const formJs = readFileSync(new URL('../js/form.js', import.meta.url), 'utf8');
 
@@ -92,8 +92,8 @@ function sampleNationals(count: number): string[] {
   return out;
 }
 
-/** How the server stores IN_MOBILE. */
-const IN_STORED = `+91${IN_MOBILE}`;
+/** How the server stores the fictitious mobile 98765 43210 that the phone tests type in each shape. */
+const IN_STORED = '+919876543210';
 
 /** Left-to-right embedding and its pop: an Android or WhatsApp copy of a number wraps it in these, unseen. */
 const LRE = '‪';
@@ -108,15 +108,15 @@ function indianShapes(n: string): string[] {
 
 describe('js/form.js phone rules against lib/schema.ts, run', () => {
   it('drops the same trunk zeros as the server (Italy keeps them)', () => {
-    expect(serverPhone(phoneShape('+9100##########'))).toBe(IN_STORED);
-    expect(client.normalisePhone('91', phoneShape('+9100##########'))).toBe(IN_STORED);
+    expect(serverPhone('+91009876543210')).toBe(IN_STORED);
+    expect(client.normalisePhone('91', '+91009876543210')).toBe(IN_STORED);
     expect(client.normalisePhone('44', '+44 07400 123456')).toBe(serverPhone('+44 07400 123456'));
     expect(client.normalisePhone('39', '06 1234 5678')).toBe('+390612345678');
     expect(client.normalisePhone('91', '+39 06 1234 5678')).toBe('+390612345678');
     expect(serverPhone('+39 06 1234 5678')).toBe('+390612345678');
     // "00" before a third 0 is not the international prefix: all three are trunk zeros, as on the server.
-    expect(client.normalisePhone('91', phoneShape('000 ##### #####'))).toBe(IN_STORED);
-    expect(serverPhone(phoneShape('+91 000 ##### #####'))).toBe(IN_STORED);
+    expect(client.normalisePhone('91', '000 98765 43210')).toBe(IN_STORED);
+    expect(serverPhone('+91 000 98765 43210')).toBe(IN_STORED);
   });
 
   it('India: every typed form of a number the server takes is taken and sent as the server stores it; the rest are refused on both sides', () => {
@@ -185,17 +185,17 @@ describe('js/form.js phone rules against lib/schema.ts, run', () => {
 
   it('with India selected, "00" and an Indian mobile is the mobile with a trunk 0 typed twice; only "+" and "0091" are international', () => {
     // Spaced or not, the two zeros before a mobile are dropped, and the server stores what is sent.
-    for (const shape of ['00##########', '00 ##### #####', '0 0 ##### #####', '0-0-#####-#####', '‪00 ##### #####‬']) {
-      expect(client.normalisePhone('91', phoneShape(shape)), shape).toBe(IN_STORED);
+    for (const shape of ['009876543210', '00 98765 43210', '0 0 98765 43210', '0-0-98765-43210', '‪00 98765 43210‬']) {
+      expect(client.normalisePhone('91', shape), shape).toBe(IN_STORED);
     }
     expect(serverPhone(IN_STORED)).toBe(IN_STORED);
     // A mobile that starts 91 is the mobile, not India's code and 8 digits.
-    const starts91 = `91${IN_MOBILE.slice(2)}`;
-    expect(client.normalisePhone('91', phoneShape('00##########', starts91))).toBe(`+91${starts91}`);
+    const starts91 = '9123456789';
+    expect(client.normalisePhone('91', `00${starts91}`)).toBe(`+91${starts91}`);
     expect(serverPhone(`+91${starts91}`)).toBe(`+91${starts91}`);
     // "0091" and "+91" are India's code, trunk 0 or not.
-    for (const shape of ['0091 ##########', '0091 0##########', '00 91 ##### #####', '+91 ##### #####']) {
-      expect(client.normalisePhone('91', phoneShape(shape)), shape).toBe(IN_STORED);
+    for (const shape of ['0091 9876543210', '0091 09876543210', '00 91 98765 43210', '+91 98765 43210']) {
+      expect(client.normalisePhone('91', shape), shape).toBe(IN_STORED);
     }
     // Every 10-digit mobile typed after "00" is sent as that Indian mobile, never as a foreign number.
     let mobiles = 0;
@@ -222,18 +222,18 @@ describe('js/form.js phone rules against lib/schema.ts, run', () => {
     expect(client.normalisePhone('44', '00971501234567')).toBe('+971501234567');
     expect(client.normalisePhone('971', '0044 7911 123456')).toBe('+447911123456');
     // The digits of an Indian mobile after "00" start a country code, as they would be dialled.
-    expect(client.normalisePhone('44', phoneShape('00##########'))).toBe(`+${IN_MOBILE}`);
-    expect(client.normalisePhone('44', phoneShape('0091 ##########'))).toBe(IN_STORED);
+    expect(client.normalisePhone('44', '009876543210')).toBe('+9876543210');
+    expect(client.normalisePhone('44', '0091 9876543210')).toBe(IN_STORED);
   });
 
   it('drops spaces, dashes, dots and parentheses, pasted typographic ones included', () => {
     const chars = { noBreakSpace: 0xa0, nonBreakingHyphen: 0x2011, enDash: 0x2013, emDash: 0x2014, minus: 0x2212 };
     for (const [name, code] of Object.entries(chars)) {
       const sep = String.fromCharCode(code);
-      expect(client.normalisePhone('91', phoneShape(`+91${sep}#####${sep}#####`)), name).toBe(IN_STORED);
+      expect(client.normalisePhone('91', `+91${sep}98765${sep}43210`), name).toBe(IN_STORED);
     }
-    expect(client.normalisePhone('91', phoneShape('(0) #####.#####'))).toBe(IN_STORED);
-    expect(client.normalisePhone('91', phoneShape('#####/#####'))).toBe('');
+    expect(client.normalisePhone('91', '(0) 98765.43210')).toBe(IN_STORED);
+    expect(client.normalisePhone('91', '98765/43210')).toBe('');
   });
 
   it('drops the invisible characters a pasted number carries, so a number that looks right is taken', () => {
@@ -245,10 +245,10 @@ describe('js/form.js phone rules against lib/schema.ts, run', () => {
     };
     for (const [name, code] of Object.entries(invisible)) {
       const c = String.fromCharCode(code);
-      const shapes: [string, string][] = [['91', `${c}#####${c}#####${c}`], ['91', `${c}+91 ##### #####${c}`], ['44', `${c}+91 ##### #####${c}`], ['91', `${c}0091 ##########`]];
+      const shapes: [string, string][] = [['91', `${c}98765${c}43210${c}`], ['91', `${c}+91 98765 43210${c}`], ['44', `${c}+91 98765 43210${c}`], ['91', `${c}0091 9876543210`]];
       for (const [dial, shape] of shapes) {
-        expect(client.normalisePhone(dial, phoneShape(shape)), `${name} ${dial} ${shape}`).toBe(IN_STORED);
-        expect(client.validate('phone', phoneShape(shape), dial), `${name} ${dial} ${shape}`).toBe('');
+        expect(client.normalisePhone(dial, shape), `${name} ${dial} ${shape}`).toBe(IN_STORED);
+        expect(client.validate('phone', shape, dial), `${name} ${dial} ${shape}`).toBe('');
       }
       // Alone they leave the field as empty as it looks.
       expect(client.validate('phone', `${c}${c}`, '91'), name).toBe('Please enter your phone number.');
@@ -266,7 +266,7 @@ describe('js/form.js phone rules against lib/schema.ts, run', () => {
     expect(client.normalisePhone('91', '+0 1234 5678')).toBe('');
     expect(client.validate('phone', '', '91')).toBe('Please enter your phone number.');
     expect(client.validate('phone', '   ', '91')).toBe('Please enter your phone number.');
-    for (const v of ['---', '()', '+', 'abcdefghij', '98765 abc 43210', phoneShape('+91 ##### ##### x2')]) {
+    for (const v of ['---', '()', '+', 'abcdefghij', '98765 abc 43210', '+91 98765 43210 x2']) {
       expect(client.validate('phone', v, '91'), v).toBe('Please enter a valid phone number.');
     }
   });

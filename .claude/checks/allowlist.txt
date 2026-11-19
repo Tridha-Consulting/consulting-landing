@@ -1,0 +1,5 @@
+# Commit-guard allowlist, one <glob>:<rule> per line (read by the commit guard's load_allowlist).
+# The phone tests type fictitious Indian mobiles in the shapes visitors use. The in-mobile rule cannot tell
+# them from a real number, so it is waived in test files only; every other rule, and in-mobile everywhere
+# else (js/, lib/, api/, the pages, commit messages), still applies.
+tests/*.test.ts:in-mobile

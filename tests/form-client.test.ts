@@ -35,6 +35,8 @@ interface LoadOptions {
   before?: (window: JSDOM['window']) => void;
   /** TURNSTILE_SITE_KEY for config.js (empty otherwise, as in the repo). */
   turnstileSiteKey?: string;
+  /** CONSENT_TEXT for config.js, as a JS string literal's contents (the repo's text otherwise). */
+  consentText?: string;
 }
 
 /** `response` answers every request; `route` answers per request and may reject to simulate a network failure. */
@@ -63,9 +65,10 @@ async function loadPage(search = '', calLink = '', response?: Reply, route?: (ur
   });
   window.Element.prototype.scrollIntoView = () => {};
   // Empty CAL_LINK (the default here): success shows the thank-you instead of mounting the calendar.
-  window.eval(read('js/config.js')
+  const config = read('js/config.js')
     .replace(/CAL_LINK:\s*'[^']*'/, `CAL_LINK: '${calLink}'`)
-    .replace(/TURNSTILE_SITE_KEY:\s*'[^']*'/, `TURNSTILE_SITE_KEY: '${opts.turnstileSiteKey ?? ''}'`));
+    .replace(/TURNSTILE_SITE_KEY:\s*'[^']*'/, `TURNSTILE_SITE_KEY: '${opts.turnstileSiteKey ?? ''}'`);
+  window.eval(opts.consentText === undefined ? config : config.replace(/CONSENT_TEXT:\s*'[^']*'/, () => `CONSENT_TEXT: '${opts.consentText}'`));
   for (const f of ['js/email-suggest.js', 'js/booking.js', 'js/form.js']) window.eval(read(f));
   if (window.document.readyState === 'loading') {
     await new Promise<void>((r) => window.document.addEventListener('DOMContentLoaded', () => r()));
@@ -660,6 +663,52 @@ describe('js/form.js proposes one Lead ID per submission, kept across retries', 
     submit(p, form);
     await vi.waitFor(() => expect(p.calls).toHaveLength(1));
     expect(leadIdOf(p.calls[0]!)).toMatch(UUID_V4);
+  });
+});
+
+describe('js/form.js shows the consent notice (CONSENT_TEXT in js/config.js) next to Submit', () => {
+  const CONSENT_TEXT = /CONSENT_TEXT: '([^']*)'/.exec(read('js/config.js'))?.[1] ?? '';
+
+  it('sits just above the Submit button and says what is collected, why, who else gets it and how to withdraw', async () => {
+    const p = await loadPage();
+    const form = openForm(p);
+    const notice = form.querySelector('.trd-consent') as HTMLElement;
+    expect(notice).not.toBeNull();
+    expect(notice.nextElementSibling?.classList.contains('trd-actions')).toBe(true);
+    expect(notice.nextElementSibling?.contains(submitButton(form))).toBe(true);
+    expect(submitButton(form).getAttribute('aria-describedby')).toBe(notice.id);
+    expect(notice.textContent).toBe(CONSENT_TEXT);
+    for (const point of [
+      'By submitting this form, you consent',
+      'your name, email, phone number and answers',
+      'to contact you about a consulting call and to schedule it',
+      'with Cal.com, our scheduling tool',
+      'To withdraw your consent or ask us to delete your details, email consulting@tridha.net',
+    ]) expect(notice.textContent, point).toContain(point);
+    const links = [...notice.querySelectorAll('a')].map((a) => [a.getAttribute('href'), a.textContent]);
+    expect(links).toEqual([['mailto:consulting@tridha.net', 'consulting@tridha.net']]);
+    // No tick-box: submitting is the consent. The only checkboxes are the bottleneck options.
+    expect([...form.querySelectorAll('input[type="checkbox"]')].every((b) => (b as HTMLInputElement).name === 'bottleneck')).toBe(true);
+    fillValid(p, form);
+    submit(p, form);
+    await vi.waitFor(() => expect(p.calls).toHaveLength(1));
+  });
+
+  it('renders the text as text, links only its address, and shows nothing when CONSENT_TEXT is empty', async () => {
+    const p = await loadPage('', '', undefined, undefined, { consentText: '<b>Hi</b> write to a.b@example.org today.' });
+    const notice = openForm(p).querySelector('.trd-consent') as HTMLElement;
+    expect(notice.querySelector('b')).toBeNull();
+    expect(notice.textContent).toBe('<b>Hi</b> write to a.b@example.org today.');
+    expect(notice.querySelector('a')?.getAttribute('href')).toBe('mailto:a.b@example.org');
+
+    const none = await loadPage('', '', undefined, undefined, { consentText: '' });
+    const form = openForm(none);
+    expect(form.querySelector('.trd-consent')).toBeNull();
+    expect(submitButton(form).hasAttribute('aria-describedby')).toBe(false);
+  });
+
+  it('is on every page with the lead form: only index.html loads js/form.js, which builds the notice into the form', () => {
+    expect(['index.html', 'book.html'].filter((page) => read(page).includes('src="js/form.js"'))).toEqual(['index.html']);
   });
 });
 

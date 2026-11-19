@@ -70,6 +70,10 @@
 .trd-suggest { padding: 0; border: 0; background: none; font: inherit; color: #155eef; text-decoration: underline; cursor: pointer; }
 .trd-submit-error { margin: 12px 0 0; font-size: 13px; color: #d92d20; }
 .trd-submit-error a { color: inherit; text-decoration: underline; }
+/* Consent notice just above Submit (js/form.js, CONSENT_TEXT in js/config.js): the modal's secondary text, as in
+   .trd-skip and .trd-error.is-hint (#475467 on white, 7.7:1), with the modal's link blue (#155eef, 5.4:1). */
+.trd-consent { margin: 12px 0 0; font-size: 13px; line-height: 1.5; color: #475467; }
+.trd-consent a { color: #155eef; text-decoration: underline; }
 
 .trd-actions {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;

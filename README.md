@@ -4,7 +4,7 @@ Static landing page plus one Vercel serverless function that appends leads to a 
 
 - `index.html`, `css/site.css`: the page, ported verbatim from the GHL custom-code block.
 - `css/form.css`, `js/form.js`: the lead modal (all 12 questions on one scrolling form, never navigates; the calendar or thank-you replaces the card in place). A submit with no answer in 20 seconds is aborted and shown like a network failure (the generic error with `FALLBACK_CONTACT`, every answer kept). Answers in progress are kept in `sessionStorage` (`trd-lead-draft-v1`, so only for that tab) to survive a reload, and dropped once the lead is saved; the honeypot and the Turnstile token are never stored.
-- `js/config.js`: all owner-editable settings (thank-you text, fallback contact, Cal.com link, ad IDs, Turnstile key).
+- `js/config.js`: all owner-editable settings (thank-you text, fallback contact, consent notice, Cal.com link, ad IDs, Turnstile key).
 - `js/track.js`: ad tags, loaded after `window.load` and only when their ID is set.
 - `js/booking.js`, `book.html`: the Cal.com inline booking embed, used by the modal and by `/book` (see Cal.com booking).
 - `api/cal-webhook.ts`: Cal.com booking webhook that updates the lead's row (see "Cal.com webhook"). `lib/cal-booking.ts` (parse + row matching, pure), `lib/cal-sheet.ts` + `lib/sheets-client.ts` (Sheets I/O shared with the lead sink).
@@ -151,6 +151,10 @@ https://consulting.tridha.net/book?name=Asha%20Rao&email=asha%40example.com&phon
 The browser reads the number as people type it: spaces, dashes, dots and parentheses are ignored, and so are the invisible characters a number copied from a phone or a chat can carry (direction marks, zero-width spaces); any other character makes the number invalid. A number typed with `+` and a country code uses that code whatever the dropdown says (`+971 50 123 4567` with India selected posts `+971501234567`). With India selected it also takes the 10-digit mobile after a trunk 0 or after 91. For other countries it checks only the length (8 to 15 digits with a typed code) and leaves the rest to the server.
 
 With India selected, only `+` and `0091` are international prefixes. `00` followed by an Indian mobile (10 digits starting 6-9) is that mobile with its trunk 0 typed twice, so it posts as `+91` and the 10 digits; `0091` and a mobile posts the same. Any other number starting `00` is refused in the browser ("Please enter a valid phone number."), so `00971501234567` with India selected is refused while `+971 50 123 4567` is posted. The zeros are read once the separators are dropped, so `0 0` counts too. Three or more zeros are all trunk zeros: they are dropped and the rest is checked as an Indian number. With another country selected, `00` is still the international prefix and its country code wins over the dropdown, as `+` does.
+
+### Consent notice
+
+Just above the form's Submit button the modal shows `CONSENT_TEXT` from `js/config.js`, a notice under the DPDP Act 2023: what the form collects (name, email, phone, the answers), what for (to contact the visitor about a consulting call and schedule it), that the booking step shares name, email, phone and company with Cal.com, and how to withdraw consent or ask for deletion (by email; the address becomes a mailto link). Submitting the form is the consent; there is no tick-box. Submit is described by the notice (`aria-describedby`), so a screen reader reads it with the button. The wording is marked DRAFT in `js/config.js`. An empty `CONSENT_TEXT` shows no notice.
 
 ### Questions and sheet columns
 

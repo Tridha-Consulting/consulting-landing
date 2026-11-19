@@ -269,6 +269,21 @@
     return n;
   }
 
+  /* The consent notice shown just above Submit: CONSENT_TEXT from js/config.js as text (never markup), its first
+     email address made a mailto link. Submit is described by it, so a screen reader reads it with the button.
+     An empty CONSENT_TEXT shows nothing. */
+  function consentNotice(id) {
+    var text = String(CFG.CONSENT_TEXT || '');
+    if (!text) return null;
+    var p = el('p', { class: 'trd-consent', id: id });
+    var m = /[^\s@]+@[^\s@]+\.[A-Za-z]{2,}/.exec(text);
+    if (!m) { p.textContent = text; return p; }
+    p.appendChild(document.createTextNode(text.slice(0, m.index)));
+    p.appendChild(el('a', { href: 'mailto:' + m[0], text: m[0] }));
+    p.appendChild(document.createTextNode(text.slice(m.index + m[0].length)));
+    return p;
+  }
+
   /* ---------- modal state ---------- */
   var overlay, card, form, closeBtn, submitBtn, submitErr, lastTrigger, root;
   /* inputs[k] is the control that carries aria-invalid (the input, or the fieldset of a choice group);
@@ -357,11 +372,13 @@
     submitErr = el('div', { class: 'trd-submit-error', role: 'alert', tabindex: '-1' });
     submitBtn = el('button', { type: 'submit', class: 'trd-btn', text: 'Submit' });
     var actions = el('div', { class: 'trd-actions' }, [el('span', { class: 'trd-spacer' }), submitBtn]);
+    var consent = consentNotice(uid + '-consent');
+    if (consent) submitBtn.setAttribute('aria-describedby', consent.id);
 
     form = el('form', { novalidate: '', autocomplete: 'on' }, [
       fullName, designation, phone, email, company, website,
       group('revenue'), group('budget'), group('bottleneck'), group('techTeam'), group('timeline'), group('decisionMaker'),
-      el('div', { class: 'trd-ts' }), hp, submitErr, actions
+      el('div', { class: 'trd-ts' }), hp, submitErr, consent, actions
     ]);
     closeBtn = el('button', { type: 'button', class: 'trd-close', 'aria-label': 'Close', text: '×' });
     var title = el('h2', { id: uid + '-title', class: 'trd-hp', text: 'Book a free call' });

@@ -3,6 +3,9 @@ window.TRIDHA_CONFIG = Object.freeze({
   THANK_YOU_TEXT: 'Thank you \u2014 our team will call you shortly.',
   BOOKED_TEXT: 'You\u2019re booked. Your confirmation and Google Meet link are on their way to your email. If you don’t see them, check the Updates or Promotions tab.',
   FALLBACK_CONTACT: 'contact@tridha.net',
+  // DRAFT consent notice (DPDP Act 2023), shown just above the form's Submit button: wording for the owner to approve.
+  // Its email address becomes a mailto link. Empty = no notice.
+  CONSENT_TEXT: 'By submitting this form, you consent to Tridha using your name, email, phone number and answers to contact you about a consulting call and to schedule it. To book the call, we share your name, email, phone number and company name with Cal.com, our scheduling tool. To withdraw your consent or ask us to delete your details, email consulting@tridha.net.',
   CAL_LINK: 'tridha-consulting/exploration-call', // Cal.com booking link as <user>/<event>. Empty = no booking step, the form ends with the thank-you text
   CAL_ORIGIN: 'https://app.cal.com', // embed host. A self-hosted Cal is a one-line change: set this to its origin, e.g. 'https://cal.example.com'
   TURNSTILE_SITE_KEY: '',

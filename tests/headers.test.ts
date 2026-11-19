@@ -116,7 +116,7 @@ const GOOGLE_HITS = [
   'https://stats.g.doubleclick.net', 'https://www.googleadservices.com', 'https://pagead2.googlesyndication.com',
 ];
 const LINKEDIN_HITS = ['https://px.ads.linkedin.com', 'https://px4.ads.linkedin.com', 'https://dc.ads.linkedin.com'];
-const X_HITS = ['https://t.co', 'https://analytics.twitter.com', 'https://ads-twitter.com', 'https://ads-api.twitter.com'];
+const X_HITS = ['https://t.co', 'https://analytics.twitter.com'];
 
 /* What each third-party script this site loads goes on to need from the page, keyed by that script's origin.
    Every host in the CSP must serve one of these needs, so this table is where a CSP host's reason lives. */
@@ -148,8 +148,11 @@ const VENDOR_NEEDS: Record<string, Needs> = {
     'img-src': [...LINKEDIN_HITS, 'https://p.adsymptotic.com', 'https://www.linkedin.com'],
     'connect-src': LINKEDIN_HITS,
   },
-  /* X pixel. uwt.js sends t.co/1/i/adsct and analytics.twitter.com/1/i/adsct by sendBeacon, falling back to an image; X's
-     pixel FAQ asks for ads-twitter.com and ads-api.twitter.com in img-src and connect-src as well. */
+  /* X pixel. uwt.js (version 2.4.12, fetched 2026-11-19) names two hosts and no others: it sends each page view and event to
+     t.co and analytics.twitter.com, as an image GET of /i/adsct in Chrome and as a sendBeacon POST of /i/adsctp elsewhere,
+     falling back to the image when the beacon is refused. It uses analytics.x.com instead only on an x.com page. Run in
+     Chromium with this CSP (Chrome and Firefox/Safari user agents), the page view, the lead event and the booked event hit
+     exactly these two hosts with no violation; with them removed, img-src or connect-src blocked every hit. */
   'https://static.ads-twitter.com': { 'img-src': X_HITS, 'connect-src': X_HITS },
   /* Cal.com embed. embed.js frames the booking page (and its preload) from the embed origin, and its injected stylesheet loads
      the Cal Sans font from cal.com. Cal's hosted app answers on cal.com too, which booking.js links visitors to. app.cal.com
@@ -277,6 +280,22 @@ describe('security headers (vercel.json)', () => {
         expect(needs(name).some((url) => allows([source], url)), `${name} ${source} serves no listed need`).toBe(true);
       }
     }
+  });
+
+  /* The X conversions (X_LEAD_EVENT_ID, X_BOOKED_EVENT_ID in js/config.js) go through the base pixel, so the X hosts the CSP
+     allows are exactly what uwt.js loads from and sends to (see VENDOR_NEEDS), and nothing else of X's anywhere. */
+  it('allows exactly the X hosts the pixel uses: uwt.js from static.ads-twitter.com, hits to t.co and analytics.twitter.com', () => {
+    const config = read('js/config.js');
+    expect(config).toMatch(/X_PIXEL_ID: 're613'/);
+    expect(config).toMatch(/X_LEAD_EVENT_ID: 'tw-re613-[a-z0-9]+'/);
+    expect(config).toMatch(/X_BOOKED_EVENT_ID: 'tw-re613-[a-z0-9]+'/);
+    expect(TAG_SCRIPTS).toContain('https://static.ads-twitter.com');
+    const isX = (source: string) => /^https:\/\/(?:[\w*-]+\.)*(?:twitter\.com|x\.com|t\.co|twimg\.com|ads-twitter\.com)$/.test(source);
+    const xIn = (name: string) => (csp.get(name) ?? []).filter(isX).sort();
+    expect(xIn('script-src')).toEqual(['https://static.ads-twitter.com']);
+    expect(xIn('img-src')).toEqual(['https://analytics.twitter.com', 'https://t.co']);
+    expect(xIn('connect-src')).toEqual(['https://analytics.twitter.com', 'https://t.co']);
+    for (const name of [...csp.keys()].filter((n) => !['script-src', 'img-src', 'connect-src'].includes(n))) expect(xIn(name), name).toEqual([]);
   });
 });
 

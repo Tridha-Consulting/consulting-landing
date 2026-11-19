@@ -683,6 +683,8 @@ describe('js/form.js shows the consent notice (CONSENT_TEXT in js/config.js) nex
       'your name, email, phone number and answers',
       'to contact you about a consulting call and to schedule it',
       'with Cal.com, our scheduling tool',
+      // uwt.js hashes the form's name, email and phone and sends them to X when Submit is pressed (seen in tmp/pw/xcsp.mjs runs).
+      'our X (Twitter) ad tag sends X a scrambled (hashed) copy of your name, email and phone number',
       'To withdraw your consent or ask us to delete your details, email consulting@tridha.net',
     ]) expect(notice.textContent, point).toContain(point);
     const links = [...notice.querySelectorAll('a')].map((a) => [a.getAttribute('href'), a.textContent]);

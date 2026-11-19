@@ -154,7 +154,7 @@ With India selected, only `+` and `0091` are international prefixes. `00` follow
 
 ### Consent notice
 
-Just above the form's Submit button the modal shows `CONSENT_TEXT` from `js/config.js`, a notice under the DPDP Act 2023: what the form collects (name, email, phone, the answers), what for (to contact the visitor about a consulting call and schedule it), that the booking step shares name, email, phone and company with Cal.com, and how to withdraw consent or ask for deletion (by email; the address becomes a mailto link). Submitting the form is the consent; there is no tick-box. Submit is described by the notice (`aria-describedby`), so a screen reader reads it with the button. The wording is marked DRAFT in `js/config.js`. An empty `CONSENT_TEXT` shows no notice.
+Just above the form's Submit button the modal shows `CONSENT_TEXT` from `js/config.js`, a notice under the DPDP Act 2023: what the form collects (name, email, phone, the answers), what for (to contact the visitor about a consulting call and schedule it), that the booking step shares name, email, phone and company with Cal.com, that the X pixel sends X hashed copies of the name, email and phone when Submit is pressed (uwt.js does this on its own: its automatic button-click event reads the form), and how to withdraw consent or ask for deletion (by email; the address becomes a mailto link). Submitting the form is the consent; there is no tick-box. Submit is described by the notice (`aria-describedby`), so a screen reader reads it with the button. The wording is marked DRAFT in `js/config.js`. An empty `CONSENT_TEXT` shows no notice.
 
 ### Questions and sheet columns
 

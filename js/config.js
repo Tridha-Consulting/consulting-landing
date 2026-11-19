@@ -14,6 +14,6 @@ window.TRIDHA_CONFIG = Object.freeze({
   LINKEDIN_PARTNER_ID: '',
   LINKEDIN_CONVERSION_ID: '',
   X_PIXEL_ID: 're613',         // X (Twitter) base pixel, loaded after window load exactly as on the old page
-  X_LEAD_EVENT_ID: '',         // X conversion event id for a lead, e.g. tw-xxxxx-yyyyy. Empty = no lead event
-  X_BOOKED_EVENT_ID: '',       // X conversion event id for a booked call. Empty = no booking event
+  X_LEAD_EVENT_ID: 'tw-re613-re62p', // X conversion event id for a lead, e.g. tw-xxxxx-yyyyy. Empty = no lead event
+  X_BOOKED_EVENT_ID: 'tw-re613-rjhhw', // X conversion event id for a booked call. Empty = no booking event
 });

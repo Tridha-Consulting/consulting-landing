@@ -227,21 +227,18 @@ describe('security headers (vercel.json)', () => {
     expect(inlineHandlers(html)).toContain('trdBookStaticFallback()');
   });
 
-  /* A plain stylesheet link blocks first paint until fonts.googleapis.com answers. The preload fetches it without blocking and
-     its onload applies it; the noscript copy applies it when scripting is off, since that onload never runs then. */
-  it.each(PAGES)('loads the Google Fonts stylesheet on %s without blocking render', (page) => {
+  /* A plain stylesheet link, as the pages always had. Loading it through a preload whose onload applies it unblocked first
+     paint, but the hero then reflowed when the web fonts swapped in (CLS 0.05 to 0.10 on a fast connection), so the owner kept
+     the blocking link. Nothing inline loads fonts, so no handler needs a hash for it. */
+  it.each(PAGES)('loads the Google Fonts stylesheet on %s with one plain stylesheet link', (page) => {
     const d = doc(read(page));
     const fonts = [...d.querySelectorAll<HTMLLinkElement>('link[href^="https://fonts.googleapis.com/"]')];
-    const preload = fonts.filter((l) => l.rel === 'preload');
-    expect(preload, 'one preload of the Google Fonts CSS').toHaveLength(1);
-    expect(preload[0]!.getAttribute('as')).toBe('style');
-    expect(preload[0]!.getAttribute('onload')).toBe("this.onload=null;this.rel='stylesheet'");
-    expect(preload[0]!.href).toContain('display=swap');
-    const fallback = fonts.filter((l) => l.rel === 'stylesheet');
-    expect(fallback, 'the only stylesheet link to the Google Fonts CSS sits in <noscript>').toHaveLength(1);
-    expect(fallback[0]!.parentElement?.localName).toBe('noscript');
-    expect(fallback[0]!.href).toBe(preload[0]!.href);
-    expect(inlineHandlers(read(page))).toContain(preload[0]!.getAttribute('onload'));
+    expect(fonts.map((l) => l.rel), 'one link to the Google Fonts CSS, a stylesheet').toEqual(['stylesheet']);
+    expect(fonts[0]!.parentElement?.localName).toBe('head');
+    expect(fonts[0]!.href).toContain('display=swap');
+    expect(fonts[0]!.hasAttribute('onload')).toBe(false);
+    expect(d.querySelector('noscript link'), 'no noscript copy of a stylesheet').toBeNull();
+    expect(d.querySelector('link[rel="preload"][as="style"]'), 'no style preload').toBeNull();
     const preconnect = (href: string) => d.querySelector<HTMLLinkElement>(`link[rel="preconnect"][href="${href}"]`);
     expect(preconnect('https://fonts.googleapis.com')?.hasAttribute('crossorigin')).toBe(false);
     expect(preconnect('https://fonts.gstatic.com')?.hasAttribute('crossorigin')).toBe(true);

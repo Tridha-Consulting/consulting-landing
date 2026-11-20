@@ -220,6 +220,35 @@ describe('llms.txt', () => {
   });
 });
 
+describe('index.html head', () => {
+  const meta = (attr: 'name' | 'property', key: string): string | null | undefined =>
+    index.querySelector(`meta[${attr}="${key}"]`)?.getAttribute('content');
+
+  it('repeats the Open Graph title and description for X, word for word', () => {
+    expect(meta('name', 'twitter:title')).toBe(meta('property', 'og:title'));
+    expect(meta('name', 'twitter:description')).toBe(meta('property', 'og:description'));
+    expect(meta('property', 'og:title')).toBe(index.title);
+  });
+
+  /* tridha.net sends og:locale en_IN. */
+  it('declares the Indian English locale', () => {
+    expect(meta('property', 'og:locale')).toBe('en_IN');
+  });
+
+  /* The browser bar sits on the sticky header, so it takes the header's colour, the --paper token (tridha.net does the same
+     with its navy header). */
+  it("colours the browser bar like the page's header", () => {
+    const paper = /--paper:\s*(#[0-9a-f]{6})\s*;/i.exec(read('css/site.css'))?.[1];
+    expect(paper).toBeDefined();
+    expect(/\.lp-header\s*\{[^}]*background:\s*var\(--paper\)/.test(read('css/site.css'))).toBe(true);
+    expect(meta('name', 'theme-color')?.toLowerCase()).toBe(paper!.toLowerCase());
+  });
+
+  it('keeps the title under 60 characters, where search results cut it', () => {
+    expect([...index.title].length).toBeLessThan(60);
+  });
+});
+
 describe('FAQ', () => {
   it('is in the page before the final booking section, as static HTML', () => {
     const sections = [...index.querySelectorAll('main > section')].map((s) => s.id);

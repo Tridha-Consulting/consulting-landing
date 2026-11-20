@@ -82,8 +82,21 @@ function sha256(text: string): string {
   return `'sha256-${createHash('sha256').update(text.replace(/\r\n?/g, '\n'), 'utf8').digest('base64')}'`;
 }
 
+/* A <script> whose type is not JavaScript, module, importmap or speculationrules is a data block: the browser never runs it
+   and the CSP never checks it, so it needs no hash (the JSON-LD on index.html, run in Chromium under this CSP: no violation).
+   Only the JSON types named here count as data; any other type is still hashed, so a script the browser does run can never
+   be waved through by its type attribute. */
+const DATA_BLOCK_TYPES = new Set(['application/ld+json', 'application/json']);
+
+function scriptType(attrs: string): string {
+  const m = /\stype\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(attrs);
+  return (m?.[1] ?? m?.[2] ?? m?.[3] ?? '').trim().toLowerCase();
+}
+
 function inlineScripts(html: string): string[] {
-  return [...html.matchAll(/<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]!);
+  return [...html.matchAll(/<script(?![^>]*\ssrc=)([^>]*)>([\s\S]*?)<\/script>/g)]
+    .filter((m) => !DATA_BLOCK_TYPES.has(scriptType(m[1]!)))
+    .map((m) => m[2]!);
 }
 
 /* jsdom parses without scripting, so <noscript> contents are elements and are checked too. The DOM hands back each attribute

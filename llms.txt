@@ -1,0 +1,34 @@
+# Tridha
+
+> Tridha is a partner-led AI consulting team for companies doing ₹20Cr to ₹1000Cr a year. We come in at the leadership level, as your strategic AI partner, and stay through execution.
+
+This file covers consulting.tridha.net, the page where a company books a free 30-minute AI strategy call with Tridha. Tridha has offices in Mumbai and New Delhi. The firm's own summary is at https://tridha.net/llms.txt.
+
+How an engagement works:
+
+- Assess: we map your operations end to end and find where the friction is, where the data lives, and where the biggest pain points sit, before proposing anything.
+- Identify: not a generic roadmap, but the two or three interventions that change the trajectory of the business.
+- Build: in your environment, staffed by the same partner who scoped the work. Production, not pilots.
+
+Track record:
+
+- Fleet Safety AI (logistics, computer vision): a computer-vision AI system deployed across the entire fleet of a national fleet logistics company. 54 days to a measurable drop in harsh-braking events. Live in production, not a pilot.
+- Battery Manufacturing (clean tech, AI engineering): cell-lifecycle prediction and failure-detection AI for a unicorn battery manufacturer, where every new chemistry took ten months to validate. Testing time is down to 6 days from 10 months.
+
+The partners:
+
+- Technology Partner: principal AI architect behind Aadhaar, the world's largest biometric identity program. Founded and exited an AI company acquired by Tencent. Former operating partner at a Boston-based billion-dollar private equity fund.
+- Business Partner: strategy and consulting experience from BCG, KPMG and Freyr Solutions.
+
+The free 30-minute call is not a sales pitch. We listen, ask about your operations, and tell you honestly whether we see an opportunity. If there's a fit, we tell you what working together looks like.
+
+## Consulting
+
+- [Book a free 30-minute AI strategy call](https://consulting.tridha.net/): the practice, the track record, the partners, the FAQ and booking.
+- [Frequently asked questions](https://consulting.tridha.net/#faq): what Tridha does, who it is for, how an engagement works, what the free call covers, how Tridha differs, and where it is based.
+
+## Tridha
+
+- [tridha.net](https://tridha.net/): Tridha is a partner-led management consulting firm where capital, strategy and AI engineering sit in one room.
+- [Contact](https://tridha.net/contact/): contact@tridha.net. A partner reads every message, and the firm replies within two working days.
+- [Tridha's llms.txt](https://tridha.net/llms.txt): the firm's own summary for language models: offerings, case work, people and contact.

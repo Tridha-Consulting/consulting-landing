@@ -205,11 +205,21 @@ describe('security headers (vercel.json)', () => {
   it('sends a CSP, X-Frame-Options DENY and the existing hardening headers on every route', () => {
     const all = rules.find((r) => r.source === '/(.*)');
     expect(all?.headers.map((h) => h.key)).toContain('Content-Security-Policy');
-    for (const path of ['/', '/book', '/api/lead', '/assets/hero.mp4']) {
+    for (const path of ['/', '/book', '/api/lead', '/assets/hero.mp4', '/llms.txt', '/robots.txt', '/sitemap.xml']) {
       expect(header(path, 'Content-Security-Policy')).toContain("default-src 'self'");
       expect(header(path, 'X-Frame-Options')).toBe('DENY');
       expect(header(path, 'X-Content-Type-Options')).toBe('nosniff');
       expect(header(path, 'Referrer-Policy')).toBe('strict-origin-when-cross-origin');
+    }
+  });
+
+  /* llms.txt holds non-ASCII text (₹), and a text/plain without a charset leaves its decoding to the reader's guess. Every
+     other path keeps the type Vercel infers from the file. */
+  it('serves /llms.txt as UTF-8 plain text, and overrides the Content-Type of no other path', () => {
+    expect(header('/llms.txt', 'Content-Type')).toBe('text/plain; charset=utf-8');
+    for (const path of ['/', '/book', '/robots.txt', '/sitemap.xml', '/assets/og.jpg', '/css/site.css', '/api/lead']) {
+      const types = rules.filter((r) => matches(r.source, path)).flatMap((r) => r.headers).filter((h) => h.key.toLowerCase() === 'content-type');
+      expect(types, path).toEqual([]);
     }
   });
 

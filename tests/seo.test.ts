@@ -183,6 +183,43 @@ describe('sitemap.xml and indexing', () => {
   });
 });
 
+/* llmstxt.org: an H1 with the name, a > summary, free text and lists with no headings, then H2 sections that are lists of
+   links, each "- [name](url)" with optional ": notes". */
+describe('llms.txt', () => {
+  const lines = read('llms.txt').split(/\r?\n/);
+  const firstH2 = lines.findIndex((l) => l.startsWith('## '));
+  const links = [...read('llms.txt').matchAll(/\[[^\]]+\]\(([^)]+)\)/g)].map((m) => m[1]!);
+
+  it('opens with the name and a one-line summary', () => {
+    expect(lines[0]).toBe('# Tridha');
+    const summary = lines.slice(1).find((l) => l.trim() !== '');
+    expect(summary).toMatch(/^> \S/);
+    expect(lines.filter((l) => l.startsWith('> ')), 'one summary line').toHaveLength(1);
+  });
+
+  it('gives the same revenue band as the page', () => {
+    const band = /₹[\d,]+Cr to ₹[\d,]+Cr/.exec(text(index.querySelector('.hero-copy .eyebrow')))?.[0];
+    expect(band).toBeDefined();
+    expect(lines.find((l) => l.startsWith('> '))).toContain(band);
+  });
+
+  it('keeps headings to the H1 and H2 link sections, each a list of links', () => {
+    expect(lines.filter((l) => /^#{3,}\s/.test(l))).toEqual([]);
+    expect(lines.slice(1, firstH2).filter((l) => l.startsWith('#'))).toEqual([]);
+    expect(firstH2).toBeGreaterThan(0);
+    for (const l of lines.slice(firstH2).filter((x) => x.trim() !== '' && !x.startsWith('## '))) {
+      expect(l, 'a section line is a link item').toMatch(/^- \[[^\]]+\]\(https:\/\/[^)]+\)(?:: .+)?$/);
+    }
+  });
+
+  it('links to this site and to tridha.net, and nowhere else', () => {
+    expect(links).toContain(SITE);
+    expect(links).toContain('https://tridha.net/');
+    for (const url of links) expect(['consulting.tridha.net', 'tridha.net'], url).toContain(new URL(url).hostname);
+    for (const url of links) expect(url, url).toMatch(/^https:\/\//);
+  });
+});
+
 describe('FAQ', () => {
   it('is in the page before the final booking section, as static HTML', () => {
     const sections = [...index.querySelectorAll('main > section')].map((s) => s.id);

@@ -146,6 +146,43 @@ describe('robots.txt', () => {
   });
 });
 
+/* The file each public URL serves (cleanUrls in vercel.json drops .html). */
+const PAGE_FOR: Record<string, string> = { '/': 'index.html', '/book': 'book.html' };
+const robotsMeta = (page: string): string =>
+  (doc(read(page)).querySelector('meta[name="robots"]')?.getAttribute('content') ?? '').toLowerCase().replace(/\s+/g, '');
+
+describe('sitemap.xml and indexing', () => {
+  const sitemap = new JSDOM(read('sitemap.xml'), { contentType: 'text/xml' }).window.document;
+  const urls = [...sitemap.getElementsByTagName('url')].map((u) => ({
+    loc: u.getElementsByTagName('loc')[0]?.textContent?.trim() ?? '',
+    lastmod: u.getElementsByTagName('lastmod')[0]?.textContent?.trim() ?? '',
+  }));
+
+  it('lists the landing page, with a lastmod date', () => {
+    expect(sitemap.documentElement.namespaceURI).toBe('http://www.sitemaps.org/schemas/sitemap/0.9');
+    expect(urls.map((u) => u.loc)).toEqual([SITE]);
+    for (const { loc, lastmod } of urls) expect(lastmod, loc).toMatch(/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/);
+  });
+
+  /* A sitemap URL is a request to index it, so it must be a page that allows indexing and calls itself canonical. */
+  it('lists only pages that may be indexed and name themselves canonical', () => {
+    for (const { loc } of urls) {
+      const page = PAGE_FOR[new URL(loc).pathname];
+      expect(page, `${loc} maps to a page in this repo`).toBeDefined();
+      expect(robotsMeta(page!)).not.toContain('noindex');
+      expect(doc(read(page!)).querySelector('link[rel="canonical"]')?.getAttribute('href')).toBe(loc);
+    }
+  });
+
+  /* /book is the step after the form (or a setter's personal link): no value on its own in a search result, but its links may
+     still be followed. */
+  it('keeps /book out of the index and out of the sitemap', () => {
+    expect(robotsMeta('book.html')).toBe('noindex,follow');
+    expect(urls.map((u) => new URL(u.loc).pathname)).not.toContain('/book');
+    expect(doc(read('book.html')).querySelector('link[rel="canonical"]'), 'a noindex page names no canonical').toBeNull();
+  });
+});
+
 describe('FAQ', () => {
   it('is in the page before the final booking section, as static HTML', () => {
     const sections = [...index.querySelectorAll('main > section')].map((s) => s.id);

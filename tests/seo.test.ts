@@ -81,6 +81,71 @@ describe('structured data (JSON-LD on index.html)', () => {
   });
 });
 
+/* robots.txt read as RFC 9309 does: a crawler takes the groups whose user-agent line names it (case-insensitive), or the *
+   group when none does, and of their rules the longest matching path wins, Allow on a tie. The file uses no * or $ inside a
+   path, and this reader refuses one rather than guess. */
+type Group = { agents: string[]; rules: { allow: boolean; path: string }[] };
+
+function robots(source: string): { groups: Group[]; sitemaps: string[] } {
+  const groups: Group[] = [];
+  const sitemaps: string[] = [];
+  let current: Group | null = null;
+  let lastWasAgent = false;
+  for (const raw of source.split(/\r?\n/)) {
+    const line = raw.replace(/#.*/, '').trim();
+    if (!line) continue;
+    const [, key = '', value = ''] = /^([^:]+):\s*(.*)$/.exec(line) ?? [];
+    const k = key.trim().toLowerCase();
+    if (k === 'user-agent') {
+      if (!lastWasAgent || !current) groups.push((current = { agents: [], rules: [] }));
+      current.agents.push(value.toLowerCase());
+      lastWasAgent = true;
+    } else if (k === 'allow' || k === 'disallow') {
+      if (!current) throw new Error(`rule before any user-agent: ${line}`);
+      if (/[*$]/.test(value)) throw new Error(`this reader does not handle wildcards: ${line}`);
+      current.rules.push({ allow: k === 'allow', path: value });
+      lastWasAgent = false;
+    } else if (k === 'sitemap') {
+      sitemaps.push(value);
+    } else {
+      throw new Error(`unknown robots.txt line: ${line}`);
+    }
+  }
+  return { groups, sitemaps };
+}
+
+function allowed(file: ReturnType<typeof robots>, agent: string, path: string): boolean {
+  const named = file.groups.filter((g) => g.agents.includes(agent.toLowerCase()));
+  const groups = named.length ? named : file.groups.filter((g) => g.agents.includes('*'));
+  const hits = groups.flatMap((g) => g.rules).filter((r) => r.path !== '' && path.startsWith(r.path));
+  hits.sort((a, b) => b.path.length - a.path.length || Number(b.allow) - Number(a.allow));
+  return hits[0]?.allow ?? true;
+}
+
+const CRAWLERS = [
+  'Googlebot', 'Bingbot', 'GPTBot', 'OAI-SearchBot', 'ChatGPT-User', 'ClaudeBot', 'Claude-SearchBot', 'Claude-User',
+  'PerplexityBot', 'Perplexity-User', 'Google-Extended', 'Applebot-Extended', 'CCBot',
+];
+
+describe('robots.txt', () => {
+  const file = robots(read('robots.txt'));
+
+  it('names each search and AI crawler the owner welcomed in a group of its own', () => {
+    const named = file.groups.flatMap((g) => g.agents).filter((a) => a !== '*');
+    expect(named.sort()).toEqual(CRAWLERS.map((c) => c.toLowerCase()).sort());
+  });
+
+  /* Naming a crawler drops the * group for it, so a named group without its own Disallow: /api/ would open the API to it. */
+  it.each([...CRAWLERS, '*', 'SomeUnlistedBot'])('lets %s fetch the pages, llms.txt and the sitemap, and never /api/', (agent) => {
+    for (const path of ['/', '/book', '/llms.txt', '/sitemap.xml', '/assets/og.jpg']) expect(allowed(file, agent, path), path).toBe(true);
+    for (const path of ['/api/lead', '/api/cal-webhook', '/api/']) expect(allowed(file, agent, path), path).toBe(false);
+  });
+
+  it('points at the sitemap', () => {
+    expect(file.sitemaps).toEqual(['https://consulting.tridha.net/sitemap.xml']);
+  });
+});
+
 describe('FAQ', () => {
   it('is in the page before the final booking section, as static HTML', () => {
     const sections = [...index.querySelectorAll('main > section')].map((s) => s.id);

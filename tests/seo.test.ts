@@ -258,7 +258,7 @@ describe('FAQ', () => {
     expect(faq.getAttribute('aria-labelledby')).toBe('faq-title');
     expect(text(faq.querySelector('h2#faq-title'))).toBe('Frequently asked questions');
     expect(visibleFaq().length).toBeGreaterThanOrEqual(5);
-    expect(visibleFaq().length).toBeLessThanOrEqual(7);
+    expect(visibleFaq().length).toBeLessThanOrEqual(8);
     for (const { q, a } of visibleFaq()) {
       expect(q, 'each question is an h3 ending in a question mark').toMatch(/\?$/);
       expect(a.length, q).toBeGreaterThan(0);

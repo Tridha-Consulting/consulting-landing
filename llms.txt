@@ -25,7 +25,14 @@ The free 30-minute call is not a sales pitch. We listen, ask about your operatio
 ## Consulting
 
 - [Book a free 30-minute AI strategy call](https://consulting.tridha.net/): the practice, the track record, the partners, the FAQ and booking.
-- [Frequently asked questions](https://consulting.tridha.net/#faq): what Tridha does, who it is for, how an engagement works, what the free call covers, how Tridha differs, and where it is based.
+- [Frequently asked questions](https://consulting.tridha.net/#faq): what Tridha does, who it is for, how an engagement works, what the free call covers, how Tridha differs, where it is based, and the work Tridha has delivered.
+
+## Selected work
+
+- [Mobility: HumSafer](https://tridha.net/insights/): a Tridha partner serves as CTO at HumSafer, on an operating mandate, for a driver-safety and fleet-logistics platform using computer vision and telematics. 200,000+ unique drivers protected in the first 100 days, 25-35% fewer harsh-braking events against the pre-deployment baseline, deployed with Tata, HUL and national fleets.
+- [Sports broadcast](https://tridha.net/insights/): a Tridha partner owned the Head of R&D & AI mandate for a global broadcast-technology firm's India business, taken from about 5% to more than 95% domestic market share at peak in three years.
+- [Cleantech](https://tridha.net/insights/): battery digital twins for a unicorn battery manufacturer, with Tridha leading AI architecture and engineering. Near year-long testing compressed to days, with $0 spent on new hardware or chemistry.
+- [Commodities](https://tridha.net/insights/): a leading metals conglomerate retained Tridha to design, build and operate the AI layer from yard to highway. Three production systems: rake tracking, blind-pushing safety alerts on existing CCTV feeds, and driver safety.
 
 ## Tridha
 

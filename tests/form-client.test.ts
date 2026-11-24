@@ -679,16 +679,13 @@ describe('js/form.js shows the consent notice (CONSENT_TEXT in js/config.js) nex
     expect(submitButton(form).getAttribute('aria-describedby')).toBe(notice.id);
     expect(notice.textContent).toBe(CONSENT_TEXT);
     for (const point of [
-      'By submitting this form, you consent',
-      'your name, email, phone number and answers',
-      'to contact you about a consulting call and to schedule it',
-      'with Cal.com, our scheduling tool',
+      'We use your details to schedule your call (via Cal.com)',
       // uwt.js hashes the form's name, email and phone and sends them to X when Submit is pressed (seen in tmp/pw/xcsp.mjs runs).
-      'our X (Twitter) ad tag sends X a scrambled (hashed) copy of your name, email and phone number',
-      'To withdraw your consent or ask us to delete your details, email consulting@tridha.net',
+      'measure our ads (X receives a hashed copy)',
+      'To have them deleted, email contact@tridha.net',
     ]) expect(notice.textContent, point).toContain(point);
     const links = [...notice.querySelectorAll('a')].map((a) => [a.getAttribute('href'), a.textContent]);
-    expect(links).toEqual([['mailto:consulting@tridha.net', 'consulting@tridha.net']]);
+    expect(links).toEqual([['mailto:contact@tridha.net', 'contact@tridha.net']]);
     // No tick-box: submitting is the consent. The only checkboxes are the bottleneck options.
     expect([...form.querySelectorAll('input[type="checkbox"]')].every((b) => (b as HTMLInputElement).name === 'bottleneck')).toBe(true);
     fillValid(p, form);

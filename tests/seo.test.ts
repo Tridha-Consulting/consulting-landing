@@ -235,13 +235,11 @@ describe('index.html head', () => {
     expect(meta('property', 'og:locale')).toBe('en_IN');
   });
 
-  /* The browser bar sits on the sticky header, so it takes the header's colour, the --paper token (tridha.net does the same
-     with its navy header). */
-  it("colours the browser bar like the page's header", () => {
-    const paper = /--paper:\s*(#[0-9a-f]{6})\s*;/i.exec(read('css/site.css'))?.[1];
-    expect(paper).toBeDefined();
-    expect(/\.lp-header\s*\{[^}]*background:\s*var\(--paper\)/.test(read('css/site.css'))).toBe(true);
-    expect(meta('name', 'theme-color')?.toLowerCase()).toBe(paper!.toLowerCase());
+  /* The browser bar takes tridha.net's theme colour, its navy (the --navy token), so both Tridha sites look alike on phones. */
+  it("colours the browser bar in tridha.net's navy", () => {
+    const navy = /--navy:\s*(#[0-9a-f]{6})\s*;/i.exec(read('css/site.css'))?.[1];
+    expect(navy?.toLowerCase()).toBe('#1a2744');
+    expect(meta('name', 'theme-color')?.toLowerCase()).toBe(navy!.toLowerCase());
   });
 
   it('keeps the title under 60 characters, where search results cut it', () => {

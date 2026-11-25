@@ -3,10 +3,10 @@ import * as lead from '../api/lead.js';
 import { columnIndex, toRow } from '../lib/columns.js';
 import { fixTokenFor } from '../lib/fix-token.js';
 import { resetLeadRateLimit } from '../lib/rate-limit.js';
-import { resetAlertThrottle } from '../lib/alert.js';
-import { BOTTLENECK_OPTIONS, BUDGET_OPTIONS, DECISION_MAKER_OPTIONS, REVENUE_OPTIONS, TECH_TEAM_OPTIONS, TIMELINE_OPTIONS } from '../lib/schema.js';
-import { makeRequest, readJsonResponse, validBody } from './helpers.js';
-import { mail, sentMail } from './mail-fake.js';
+import { ALERT_DEADLINE_MS, resetAlertThrottle } from '../lib/alert.js';
+import { BOTTLENECK_OPTIONS } from '../lib/schema.js';
+import { detailsOf, expectEveryLeadField, fullBody, makeRequest, readJsonResponse, validBody } from './helpers.js';
+import { expectNoMail, mail, mails } from './mail-fake.js';
 
 const write = vi.fn();
 vi.mock('../lib/sinks/index.js', () => ({ sinks: [{ name: 'test', write: (l: unknown) => write(l) }] }));
@@ -434,43 +434,48 @@ describe('failure alerts', () => {
 
   it('a lost lead mails every field of the lead, and the response is unchanged', async () => {
     write.mockRejectedValue(new Error('sheets down'));
-    const out = await call('POST', { ...validBody, utmSource: 'meta' }, { 'x-forwarded-for': '203.0.113.9', 'user-agent': 'UA/1' });
+    const out = await call('POST', fullBody, { 'x-forwarded-for': '203.0.113.9', 'user-agent': 'UA/1' });
     expect(out.statusCode).toBe(502);
     expect(out.body).toEqual({ ok: false, error: 'write_failed' });
     expect(loggedEvent(errSpy, 'LEAD_WRITE_FAILED')).toMatchObject({ error: 'sheets down' });
 
-    const [mailed] = sentMail();
-    expect(sentMail()).toHaveLength(1);
-    expect(mailed!.subject).toBe('[consulting.tridha.net] Lead NOT saved: Asha Rao (Rao Textiles)');
-    for (const value of [
-      'Asha Rao',
-      'asha@example.com',
-      '+919812345678',
-      'Founder',
-      'Rao Textiles',
-      'raotextiles.in',
-      REVENUE_OPTIONS[1],
-      BUDGET_OPTIONS[2],
-      BOTTLENECK_OPTIONS[0],
-      BOTTLENECK_OPTIONS[3],
-      TECH_TEAM_OPTIONS[1],
-      TIMELINE_OPTIONS[0],
-      DECISION_MAKER_OPTIONS[0],
-      'meta',
-      '203.0.113.9',
-      'UA/1',
-      'sheets down',
-    ]) {
-      expect(mailed!.text, value).toContain(JSON.stringify(value).slice(1, -1));
-    }
-    expect(mailed!.text).toMatch(/"leadId": "[0-9a-f-]{36}"/);
+    const sent = await mails();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.subject).toBe('[consulting.tridha.net] Lead NOT saved: Asha Rao (Rao Textiles)');
+    expect(sent[0]!.text).toContain('sheets down');
+    const details = detailsOf(sent[0]!.text) as { lead: Record<string, unknown>; failures: unknown[] };
+    expectEveryLeadField(details.lead);
+    expect(details.lead).toMatchObject({ ip: '203.0.113.9', userAgent: 'UA/1', emailCheck: 'OK' });
+    expect(details.lead.leadId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(details.lead.submittedAt).toEqual(expect.any(String));
+    expect(details.failures).toEqual([{ sink: 'test', error: 'sheets down' }]);
   });
 
   it('mails each distinct lost lead, even in quick succession', async () => {
     write.mockRejectedValue(new Error('sheets down'));
     await call('POST', validBody);
     await call('POST', validBody);
-    expect(sentMail()).toHaveLength(2);
+    expect(await mails()).toHaveLength(2);
+  });
+
+  it('answers before the mail is sent: a hung mail server does not delay the response', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      write.mockRejectedValue(new Error('sheets down'));
+      mail.sendMail.mockReturnValue(new Promise(() => {}));
+      const out = await call('POST', validBody);
+      // The response is in hand while the one alert is still waiting on the mail server.
+      expect(out.statusCode).toBe(502);
+      expect(mail.waitUntil).toHaveBeenCalledTimes(1);
+      const pending = Symbol('pending');
+      expect(await Promise.race([mail.background[0], Promise.resolve(pending)])).toBe(pending);
+      // The platform keeps the function alive for it, and it gives up at the deadline.
+      await vi.advanceTimersByTimeAsync(ALERT_DEADLINE_MS + 1);
+      await mail.flush();
+      expect(loggedEvent(errSpy, 'ALERT_SEND_FAILED')).toMatchObject({ alertEvent: 'LEAD_WRITE_FAILED', error: expect.stringContaining('timed out') });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a mail that cannot be sent changes nothing in the response', async () => {
@@ -479,12 +484,14 @@ describe('failure alerts', () => {
     const out = await call('POST', validBody);
     expect(out.statusCode).toBe(502);
     expect(out.body).toEqual({ ok: false, error: 'write_failed' });
+    await mail.flush();
     expect(loggedEvent(errSpy, 'ALERT_SEND_FAILED')).toMatchObject({ alertEvent: 'LEAD_WRITE_FAILED', error: 'smtp down' });
   });
 
   it('a saved lead sends no mail', async () => {
     expect((await call('POST', validBody)).statusCode).toBe(200);
-    expect(mail.createTransport).not.toHaveBeenCalled();
+    await expectNoMail();
+    expect(mail.waitUntil).not.toHaveBeenCalled();
   });
 
   it('an unconfigured mailbox changes nothing in the response and logs ALERT_NOT_CONFIGURED', async () => {
@@ -494,8 +501,8 @@ describe('failure alerts', () => {
     const out = await call('POST', validBody);
     expect(out.statusCode).toBe(502);
     expect(out.body).toEqual({ ok: false, error: 'write_failed' });
+    await expectNoMail();
     expect(loggedEvent(warn, 'ALERT_NOT_CONFIGURED')).toMatchObject({ alertEvent: 'LEAD_WRITE_FAILED' });
-    expect(mail.createTransport).not.toHaveBeenCalled();
   });
 
   it('a rate-limited lead sends no mail', async () => {
@@ -503,24 +510,62 @@ describe('failure alerts', () => {
     for (let i = 0; i < 5; i++) await call('POST', validBody, ipA);
     const out = await call('POST', validBody, ipA);
     expect(out.statusCode).toBe(429);
-    expect(mail.createTransport).not.toHaveBeenCalled();
+    await expectNoMail();
   });
 
-  it('a rejected captcha, an unreachable captcha, and a validation error send no mail', async () => {
+  it('a rejected captcha and a validation error send no mail', async () => {
     vi.stubEnv('TURNSTILE_SECRET_KEY', 'secret');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ success: false }) }));
     expect((await call('POST', { ...validBody, turnstileToken: 'bad' })).statusCode).toBe(400);
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')));
-    expect((await call('POST', { ...validBody, turnstileToken: 'tok' })).statusCode).toBe(502);
     vi.stubEnv('TURNSTILE_SECRET_KEY', '');
     expect((await call('POST', { ...validBody, budget: undefined })).statusCode).toBe(400);
-    expect(mail.createTransport).not.toHaveBeenCalled();
+    await expectNoMail();
+  });
+
+  it('an unreachable captcha check drops the lead, so it mails the lead as submitted, and answers 502 as before', async () => {
+    vi.stubEnv('TURNSTILE_SECRET_KEY', 'secret');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')));
+    const out = await call('POST', { ...fullBody, turnstileToken: 'tok' }, { 'x-forwarded-for': '203.0.113.9' });
+    expect(out.statusCode).toBe(502);
+    expect(out.body).toEqual({ ok: false, error: 'captcha_unavailable' });
+    expect(write).not.toHaveBeenCalled();
+    const sent = await mails();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.subject).toBe('[consulting.tridha.net] Lead NOT saved (captcha check unavailable): Asha Rao (Rao Textiles)');
+    expect(sent[0]!.text).toContain('fetch failed');
+    const details = detailsOf(sent[0]!.text) as { lead: Record<string, unknown>; ip: string };
+    expectEveryLeadField(details.lead);
+    expect(details.lead).not.toHaveProperty('turnstileToken');
+    expect(details.ip).toBe('203.0.113.9');
+  });
+
+  it('an unreachable captcha check with a body that has no usable name still mails, and answers as before', async () => {
+    vi.stubEnv('TURNSTILE_SECRET_KEY', 'secret');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')));
+    const out = await call('POST', { fullName: 42, company: ['x'], turnstileToken: 'tok' });
+    expect(out.statusCode).toBe(502);
+    expect((await mails())[0]!.subject).toBe('[consulting.tridha.net] Lead NOT saved (captcha check unavailable): unknown (unknown)');
+  });
+
+  it('unreachable-captcha mails are capped at five per ten minutes, the last one saying so, whatever the sender', async () => {
+    vi.stubEnv('TURNSTILE_SECRET_KEY', 'secret');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')));
+    for (let i = 0; i < 8; i++) {
+      const out = await call('POST', { ...validBody, turnstileToken: 'tok' }, { 'x-forwarded-for': `203.0.113.${i + 1}` });
+      expect(out.statusCode).toBe(502);
+    }
+    const sent = await mails();
+    expect(sent).toHaveLength(5);
+    expect(sent.slice(0, 4).every((m) => !m.text.includes('suppressed'))).toBe(true);
+    expect(sent[4]!.text).toContain('Further alerts of this type are suppressed for 10 minutes; see the Vercel logs');
+    // The over-cap leads are still in the logs.
+    expect(errSpy.mock.calls.filter((c: unknown[]) => String(c[0]).includes('LEAD_CAPTCHA_UNAVAILABLE'))).toHaveLength(8);
   });
 
   it('a missing CRON_SECRET (no fix token) sends no mail', async () => {
     vi.stubEnv('CRON_SECRET', '');
     checkEmailDomain.mockResolvedValue('No mail server');
     expect((await call('POST', validBody)).statusCode).toBe(200);
-    expect(mail.createTransport).not.toHaveBeenCalled();
+    await expectNoMail();
   });
 });

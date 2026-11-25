@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { sendAlert } from '../lib/alert.js';
+import { alertInBackground } from '../lib/alert.js';
 import { safeEqual } from '../lib/safe-equal.js';
 
 // Daily Vercel cron. (a) Sweeps the next 90 days of the calendar for booker declines, which covers any
@@ -25,7 +25,7 @@ export async function GET(request: Request): Promise<Response> {
   if (!secret) {
     const error = 'Missing required environment variable: CRON_SECRET';
     console.error(JSON.stringify({ event: 'CALENDAR_CRON_MISCONFIGURED', error }));
-    await sendAlert({
+    alertInBackground({
       event: 'CALENDAR_CRON_MISCONFIGURED',
       subject: 'Daily calendar job cannot run: CRON_SECRET missing',
       summary: 'The daily calendar job is refused with a 500, so the decline sweep and the push-channel renewal do not run.',
@@ -49,7 +49,7 @@ export async function GET(request: Request): Promise<Response> {
     ({ syncFromCalendar } = await import('../lib/calendar-sync.js'));
   } catch (err) {
     console.error(JSON.stringify({ event: 'CALENDAR_CRON_MISCONFIGURED', error: message(err) }));
-    await sendAlert({
+    alertInBackground({
       event: 'CALENDAR_CRON_MISCONFIGURED',
       subject: 'Daily calendar job cannot run: calendar settings missing',
       summary: 'The daily calendar job is refused with a 500, so the decline sweep and the push-channel renewal do not run.',
@@ -76,7 +76,7 @@ export async function GET(request: Request): Promise<Response> {
   } catch (err) {
     failed = true;
     console.error(JSON.stringify({ event: 'CALENDAR_SWEEP_FAILED', error: message(err) }));
-    await sendAlert({
+    alertInBackground({
       event: 'CALENDAR_SWEEP_FAILED',
       subject: 'Daily calendar decline sweep failed',
       summary: 'The daily sweep of the calendar for declined invitations failed, so a decline whose push notification never arrived is not flagged on its lead.',
@@ -101,7 +101,7 @@ export async function GET(request: Request): Promise<Response> {
   } catch (err) {
     failed = true;
     console.error(JSON.stringify({ event: 'CALENDAR_WATCH_RENEW_FAILED', error: message(err) }));
-    await sendAlert({
+    alertInBackground({
       event: 'CALENDAR_WATCH_RENEW_FAILED',
       subject: 'Calendar push channel not renewed',
       summary: 'The daily job could not open a new push channel. Channels last two days, so when the current one expires booker declines stop syncing to the Sheet, apart from the daily sweep.',

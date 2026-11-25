@@ -3,7 +3,7 @@ import { MANUAL_HEADERS } from '../lib/columns.js';
 import { fixTokenFor } from '../lib/fix-token.js';
 import { COL, SHEET_ID, fake, leadRow, privateKey, resetFakes } from './calendar-fakes.js';
 import { readJsonResponse } from './helpers.js';
-import { mail, sentMail } from './mail-fake.js';
+import { expectNoMail, mail, mails } from './mail-fake.js';
 
 // The real JWT, gaxios, handler and Sheets code run; only the network is faked (tests/calendar-fakes.ts).
 vi.mock('google-auth-library', async () => {
@@ -437,23 +437,23 @@ describe('POST /api/lead-email: failure alerts', () => {
     const out = await call('POST', body);
     expect(out.status).toBe(502);
     expect(out.body).toEqual({ ok: false, error: 'write_failed' });
-    expect(sentMail()).toHaveLength(1);
-    expect(sentMail()[0]!.subject).toBe('[consulting.tridha.net] Corrected lead email NOT saved');
-    expect(sentMail()[0]!.text).toContain(LEAD_ID);
-    expect(sentMail()[0]!.text).toContain('corrected@example.org');
+    expect((await mails())).toHaveLength(1);
+    expect((await mails())[0]!.subject).toBe('[consulting.tridha.net] Corrected lead email NOT saved');
+    expect((await mails())[0]!.text).toContain(LEAD_ID);
+    expect((await mails())[0]!.text).toContain('corrected@example.org');
   });
 
   it('a wrong header row and a missing Sheet environment mail, and answer 500 as before', async () => {
     fake.sheet[0] = [...fake.sheet[0]!.slice(0, 10), 'Inserted', ...fake.sheet[0]!.slice(10)];
     fake.sheet.push(badRow());
     expect((await call('POST', body)).status).toBe(500);
-    expect(sentMail().map((m) => m.subject)).toEqual(['[consulting.tridha.net] Corrected lead email NOT saved: Sheet header row is wrong']);
+    expect((await mails()).map((m) => m.subject)).toEqual(['[consulting.tridha.net] Corrected lead email NOT saved: Sheet header row is wrong']);
 
     vi.stubEnv('SHEET_ID', '');
     vi.resetModules();
     const out = await call('POST', { ...body, leadId: OTHER_ID });
     expect(out).toMatchObject({ status: 500, body: { ok: false, error: 'server_misconfigured' } });
-    expect(sentMail().map((m) => m.subject)[1]).toBe('[consulting.tridha.net] Corrected lead email NOT saved: server misconfigured');
+    expect((await mails()).map((m) => m.subject)[1]).toBe('[consulting.tridha.net] Corrected lead email NOT saved: server misconfigured');
   });
 
   it('a request without a valid fix token, a missing lead, a conflict and a success send no mail', async () => {
@@ -463,6 +463,6 @@ describe('POST /api/lead-email: failure alerts', () => {
     expect((await call('POST', body)).status).toBe(200);
     vi.stubEnv('CRON_SECRET', '');
     expect((await call('POST', { ...body, fixToken: 'anything' })).status).toBe(500);
-    expect(mail.createTransport).not.toHaveBeenCalled();
+    await expectNoMail();
   });
 });

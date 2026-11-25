@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { sendAlert } from '../lib/alert.js';
+import { alertInBackground } from '../lib/alert.js';
 import { classifyChannel } from '../lib/channel.js';
 import { EMAIL_CHECK, checkEmailDomain } from '../lib/email-domain.js';
 import { EVENT_LOG_DEADLINE_MS, logEvents } from '../lib/event-log.js';
@@ -34,6 +34,12 @@ async function verifyTurnstile(secret: string, token: unknown, ip: string): Prom
   if (!res.ok) return { success: false, errorCodes: [`siteverify-http-${res.status}`] };
   const data = (await res.json()) as { success?: boolean; 'error-codes'?: string[] };
   return { success: data.success === true, errorCodes: data['error-codes'] ?? [] };
+}
+
+/** "name (company)" of a body that has not been validated yet, for an alert subject; never throws on a wrong type. */
+function submitterLabel(body: Record<string, unknown>): string {
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : 'unknown');
+  return `${text(body.fullName)} (${text(body.company)})`;
 }
 
 /** The lead as submitted, minus the one-shot captcha token. */
@@ -73,13 +79,16 @@ export async function POST(request: Request): Promise<Response> {
       verdict = await verifyTurnstile(turnstileSecret, body.turnstileToken, ip);
     } catch (err) {
       // The lead is dropped here, so log it in full like every other lost write.
-      console.error(
-        JSON.stringify({
-          event: 'LEAD_CAPTCHA_UNAVAILABLE',
-          error: err instanceof Error ? err.message : String(err),
-          lead: submittedLead(body),
-        }),
-      );
+      const error = err instanceof Error ? err.message : String(err);
+      console.error(JSON.stringify({ event: 'LEAD_CAPTCHA_UNAVAILABLE', error, lead: submittedLead(body) }));
+      alertInBackground({
+        event: 'LEAD_CAPTCHA_UNAVAILABLE',
+        subject: `Lead NOT saved (captcha check unavailable): ${submitterLabel(body)}`,
+        summary: 'A lead submitted the form, but the captcha check could not reach Cloudflare, so the lead was dropped and NOT saved. The submitted answers are below; contact the lead or add them to the Sheet by hand.',
+        error,
+        details: { lead: submittedLead(body), ip, submittedAt: new Date().toISOString() },
+        dedupeKey: proposedLeadId(body.leadId),
+      });
       return json(502, { ok: false, error: 'captcha_unavailable' });
     }
     if (!verdict.success) {
@@ -168,7 +177,7 @@ async function storeLead(request: Request, data: LeadInput, ip: string, proposed
     const error = err instanceof Error ? err.message : String(err);
     console.error(JSON.stringify({ event: 'LEAD_SINK_MISCONFIGURED', error }));
     // The lead is lost here, so the alert carries what was submitted, for the team to enter by hand.
-    await sendAlert({
+    alertInBackground({
       event: 'LEAD_SINK_MISCONFIGURED',
       subject: `Lead NOT saved, server misconfigured: ${data.fullName} (${data.company})`,
       summary: 'A lead submitted the form, but no Sheet is configured to store it, so it was NOT saved. The submitted answers are below; add them to the Sheet by hand, then fix the environment variables.',
@@ -218,7 +227,7 @@ async function storeLead(request: Request, data: LeadInput, ip: string, proposed
 
   if (failures.length) {
     const lost = written === 0;
-    await sendAlert({
+    alertInBackground({
       event: 'LEAD_WRITE_FAILED',
       subject: lost ? `Lead NOT saved: ${lead.fullName} (${lead.company})` : `Lead saved, but sink failed: ${lead.fullName} (${lead.company})`,
       summary: lost

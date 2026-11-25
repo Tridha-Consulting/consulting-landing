@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { sendAlert } from '../lib/alert.js';
+import { alertInBackground } from '../lib/alert.js';
 import { eventNameFor, isHandledTrigger, parseBooking } from '../lib/cal-booking.js';
 import { SheetLayoutError } from '../lib/columns.js';
 import { EVENT_LOG_DEADLINE_MS, logEvents } from '../lib/event-log.js';
@@ -43,7 +43,7 @@ export async function POST(request: Request): Promise<Response> {
     const error = 'Missing required environment variable: CAL_WEBHOOK_SECRET';
     console.error(JSON.stringify({ event: 'CAL_WEBHOOK_MISCONFIGURED', error }));
     // Reachable without a signature, so the alert is throttled to one per window instead of one per request.
-    await sendAlert({
+    alertInBackground({
       event: 'CAL_WEBHOOK_MISCONFIGURED',
       subject: 'Cal.com webhook cannot verify bookings: secret missing',
       summary: 'Every Cal.com booking webhook is being refused with a 500 because CAL_WEBHOOK_SECRET is not set, so no booking reaches the Sheet.',
@@ -76,7 +76,7 @@ export async function POST(request: Request): Promise<Response> {
     // Signature-verified and at most 64 KB, so the raw text is safe to log and is the recovery path.
     console.error(JSON.stringify({ event: 'CAL_WEBHOOK_BAD_PAYLOAD', error: 'invalid_json', body: raw }));
     // Past the signature check, so only the holder of the secret can reach this.
-    await sendAlert({
+    alertInBackground({
       event: 'CAL_WEBHOOK_BAD_PAYLOAD',
       subject: 'Cal.com webhook body is not valid JSON',
       summary: 'A signed Cal.com webhook arrived whose body is not a JSON object, so it was rejected with a 400 and nothing was written. The raw body is below.',
@@ -94,7 +94,7 @@ export async function POST(request: Request): Promise<Response> {
   const booking = parseBooking(body.payload);
   if (!booking.ok) {
     console.error(JSON.stringify({ event: 'CAL_WEBHOOK_BAD_PAYLOAD', trigger, issues: booking.issues, payload: body.payload }));
-    await sendAlert({
+    alertInBackground({
       event: 'CAL_WEBHOOK_BAD_PAYLOAD',
       subject: `Cal.com ${trigger} webhook has an unusable payload`,
       summary: 'A signed Cal.com webhook was rejected with a 400 because its booking payload is missing required fields, so nothing was written to the Sheet.',
@@ -112,7 +112,7 @@ export async function POST(request: Request): Promise<Response> {
     // Missing Sheet env fails module load. The payload is logged: Vercel logs are the recovery path.
     const error = err instanceof Error ? err.message : String(err);
     console.error(JSON.stringify({ event: 'CAL_WEBHOOK_MISCONFIGURED', error, trigger, payload: body.payload }));
-    await sendAlert({
+    alertInBackground({
       event: 'CAL_WEBHOOK_MISCONFIGURED',
       subject: `Cal.com ${trigger} booking NOT recorded: server misconfigured`,
       summary: 'A Cal.com booking webhook could not be recorded because the Sheet is not configured. Cal.com will not retry a 500; the payload is below.',
@@ -155,7 +155,7 @@ export async function POST(request: Request): Promise<Response> {
       // Nothing was written. Retrying cannot help until the header row is fixed, so 500 with the
       // payload logged for recovery, like any other misconfiguration.
       console.error(JSON.stringify({ event: 'CAL_WEBHOOK_MISCONFIGURED', error: err.message, trigger, payload: body.payload }));
-      await sendAlert({
+      alertInBackground({
         event: 'CAL_WEBHOOK_MISCONFIGURED',
         subject: `Cal.com ${trigger} booking NOT recorded: Sheet header row is wrong`,
         summary: 'A Cal.com booking could not be written because the Sheet header row differs from the one the code expects. Nothing was written; fix the header row, then re-enter the booking from the payload below.',
@@ -169,7 +169,7 @@ export async function POST(request: Request): Promise<Response> {
     const error = err instanceof Error ? err.message : String(err);
     console.error(JSON.stringify({ event: 'CAL_WEBHOOK_WRITE_FAILED', error, trigger, payload: body.payload }));
     // Cal retries, so a retry of this booking and trigger shares the key and is not mailed again.
-    await sendAlert({
+    alertInBackground({
       event: 'CAL_WEBHOOK_WRITE_FAILED',
       subject: `Cal.com ${trigger} booking not written to the Sheet`,
       summary: 'A Cal.com booking webhook could not be written to the Sheet (answered 502, so Cal.com retries). If the retries run out, the payload below is what to enter by hand.',

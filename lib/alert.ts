@@ -1,4 +1,5 @@
-import { formatIST } from './columns.js';
+import { waitUntil } from '@vercel/functions';
+import { formatIST } from './ist.js';
 
 // Failure alerts: one plain-text email to the team through the Zoho mailbox, sent from the failure paths of
 // the API endpoints. Vercel's Hobby plan keeps logs for about an hour, so a lead that fails to save at night
@@ -18,16 +19,25 @@ export interface Alert {
   dedupeKey?: string;
 }
 
-/** The whole send, connection included, finishes or is abandoned within this time. */
+/** The whole send, import and connection included, finishes or is abandoned within this time. */
 export const ALERT_DEADLINE_MS = 6000;
 export const THROTTLE_MS = 10 * 60 * 1000;
 export const MAX_BODY_BYTES = 60 * 1024;
+/**
+ * Events a stranger can reach without any credential (a valid-looking lead while the server is misconfigured),
+ * each with its own key, so the per-key throttle alone would not bound them: at most this many mails per
+ * THROTTLE_MS on one instance, whatever the keys.
+ */
+export const WINDOW_CAPS: Readonly<Record<string, number>> = { LEAD_SINK_MISCONFIGURED: 5, LEAD_CAPTCHA_UNAVAILABLE: 5 };
 const MAX_SUBJECT_CHARS = 150;
 const SUBJECT_PREFIX = '[consulting.tridha.net] ';
 const DEFAULT_USER = 'consulting@tridha.net';
 const DEFAULT_HOST = 'smtp.zoho.in';
 
+/** When each throttle key was last sent. */
 const sentAt = new Map<string, number>();
+/** When each capped event was sent, within the window. */
+const capSends = new Map<string, number[]>();
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -40,7 +50,10 @@ function logFailure(alertEvent: string, err: unknown): void {
 /** One line: control characters (CR and LF included) become spaces, so a name can never add a mail header. */
 function subjectLine(subject: string): string {
   const clean = subject.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim();
-  return (SUBJECT_PREFIX + clean).slice(0, MAX_SUBJECT_CHARS);
+  // By code point, so the cut never splits a surrogate pair.
+  return Array.from(SUBJECT_PREFIX + clean)
+    .slice(0, MAX_SUBJECT_CHARS)
+    .join('');
 }
 
 /** Cuts `text` to at most `maxBytes` of UTF-8 without splitting a character. */
@@ -61,9 +74,11 @@ function stringifyDetails(details: unknown): string {
   }
 }
 
-/** The plain-text body: what failed, when (IST), the error, then the details. */
-export function alertBody(alert: Alert, now: Date = new Date()): string {
-  const lines = [alert.summary ?? `Something failed on consulting.tridha.net (${alert.event}).`, '', `Event: ${alert.event}`, `Time (IST): ${formatIST(now)}`];
+/** The plain-text body: what failed, when (IST), the error, then the details. A `notice` goes right after the summary. */
+export function alertBody(alert: Alert, now: Date = new Date(), notice?: string): string {
+  const lines = [alert.summary ?? `Something failed on consulting.tridha.net (${alert.event}).`];
+  if (notice) lines.push('', notice);
+  lines.push('', `Event: ${alert.event}`, `Time (IST): ${formatIST(now)}`);
   if (alert.error) lines.push(`Error: ${alert.error}`);
   if (alert.details !== undefined) lines.push('', 'Details:', stringifyDetails(alert.details));
   const body = lines.join('\n');
@@ -71,27 +86,58 @@ export function alertBody(alert: Alert, now: Date = new Date()): string {
   return `${truncateBytes(body, MAX_BODY_BYTES)}\n\n[truncated: the body was cut at ${MAX_BODY_BYTES / 1024} KB; the full text is in the Vercel logs]`;
 }
 
-/** True when `key` was already sent inside the window; otherwise records it as sent now. */
-function throttled(key: string, now: number): boolean {
+interface Slot {
+  /** True when this is the last mail the window allows for a capped event. */
+  last: boolean;
+  /** Gives the slot back, so a send that failed does not suppress the next attempt. */
+  release(): void;
+}
+
+/** Claims the throttle key and the window cap for `alert`, or returns null when either is used up. */
+function reserve(alert: Alert, now: number): Slot | null {
   for (const [k, at] of sentAt) if (now - at >= THROTTLE_MS) sentAt.delete(k);
-  if (sentAt.has(key)) return true;
-  sentAt.set(key, now);
-  return false;
+  for (const [event, stamps] of capSends) {
+    const live = stamps.filter((at) => now - at < THROTTLE_MS);
+    if (live.length) capSends.set(event, live);
+    else capSends.delete(event);
+  }
+
+  const key = alert.dedupeKey !== undefined ? `${alert.event}:${alert.dedupeKey}` : undefined;
+  if (key !== undefined && sentAt.has(key)) return null;
+  const cap = WINDOW_CAPS[alert.event];
+  const stamps = capSends.get(alert.event) ?? [];
+  if (cap !== undefined && stamps.length >= cap) return null;
+
+  if (key !== undefined) sentAt.set(key, now);
+  if (cap !== undefined) capSends.set(alert.event, [...stamps, now]);
+  return {
+    last: cap !== undefined && stamps.length + 1 === cap,
+    release() {
+      if (key !== undefined && sentAt.get(key) === now) sentAt.delete(key);
+      const held = capSends.get(alert.event);
+      const at = held?.indexOf(now) ?? -1;
+      if (held && at >= 0) held.splice(at, 1);
+    },
+  };
 }
 
 /** Clears the throttle; for tests. */
 export function resetAlertThrottle(): void {
   sentAt.clear();
+  capSends.clear();
 }
 
 /**
- * Emails `alert` to the team. Never throws and takes at most ALERT_DEADLINE_MS, so a caller can await it on
- * a failure path without changing its response. Without ALERT_SMTP_PASS it only logs that alerts are off.
- * Resolves true when the mail was accepted by the server, false when it was skipped or failed.
+ * Emails `alert` to the team. Never throws and takes at most ALERT_DEADLINE_MS, import included. Without
+ * ALERT_SMTP_PASS it only logs that alerts are off. Resolves true when the mail was accepted by the server,
+ * false when it was skipped or failed. Endpoints call alertInBackground, not this, so a slow mail server never
+ * delays a response.
  */
 export async function sendAlert(alert: Alert): Promise<boolean> {
+  const startedAt = Date.now();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let transport: { close(): void } | undefined;
+  let slot: Slot | null = null;
   try {
     // Read per call, not at module load, so the site runs unchanged without these set.
     const pass = process.env.ALERT_SMTP_PASS?.trim();
@@ -99,36 +145,48 @@ export async function sendAlert(alert: Alert): Promise<boolean> {
       console.warn(JSON.stringify({ event: 'ALERT_NOT_CONFIGURED', alertEvent: alert.event }));
       return false;
     }
-    if (alert.dedupeKey !== undefined && throttled(`${alert.event}:${alert.dedupeKey}`, Date.now())) {
+    slot = reserve(alert, startedAt);
+    if (!slot) {
       console.warn(JSON.stringify({ event: 'ALERT_THROTTLED', alertEvent: alert.event }));
       return false;
     }
+    const notice = slot.last ? 'Further alerts of this type are suppressed for 10 minutes; see the Vercel logs for any that follow.' : undefined;
 
     const user = process.env.ALERT_SMTP_USER?.trim() || DEFAULT_USER;
     const to = process.env.ALERT_TO?.trim() || user;
     const host = process.env.ALERT_SMTP_HOST?.trim() || DEFAULT_HOST;
 
-    const nodemailer = await import('nodemailer');
-    const created = nodemailer.createTransport({
-      host,
-      port: 465,
-      secure: true,
-      auth: { user, pass },
-      connectionTimeout: ALERT_DEADLINE_MS,
-      greetingTimeout: ALERT_DEADLINE_MS,
-      socketTimeout: ALERT_DEADLINE_MS,
-    });
-    transport = created;
-
-    const send = created.sendMail({ from: user, to, subject: subjectLine(alert.subject), text: alertBody(alert) });
-    // Without a handler, a send that fails after the deadline would be an unhandled rejection.
-    send.catch(() => {});
+    // The timer starts before the import, so loading nodemailer counts toward the deadline.
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(`timed out after ${ALERT_DEADLINE_MS} ms`)), ALERT_DEADLINE_MS);
     });
-    await Promise.race([send, deadline]);
+    const delivery = (async () => {
+      const nodemailer = await import('nodemailer');
+      const created = nodemailer.createTransport({
+        host,
+        port: 465,
+        secure: true,
+        auth: { user, pass },
+        connectionTimeout: ALERT_DEADLINE_MS,
+        greetingTimeout: ALERT_DEADLINE_MS,
+        socketTimeout: ALERT_DEADLINE_MS,
+      });
+      transport = created;
+      await created.sendMail({
+        from: user,
+        to,
+        subject: subjectLine(alert.subject),
+        text: alertBody(alert, new Date(), notice),
+        // Aborting the send is what closes an open SMTP connection; closing the transport does not.
+        signal: AbortSignal.timeout(Math.max(1, ALERT_DEADLINE_MS - (Date.now() - startedAt))),
+      });
+    })();
+    // A delivery that fails after the deadline has no one waiting on it.
+    delivery.catch(() => {});
+    await Promise.race([delivery, deadline]);
     return true;
   } catch (err) {
+    slot?.release();
     logFailure(alert.event, err);
     return false;
   } finally {
@@ -138,5 +196,18 @@ export async function sendAlert(alert: Alert): Promise<boolean> {
     } catch {
       // Closing a transport that never connected can throw; the send's outcome is already settled.
     }
+  }
+}
+
+/**
+ * Starts the alert and returns at once: the mail is sent after the response, kept alive by the platform's
+ * waitUntil. Without a request context (local runs, tests) the promise simply runs on. Never throws.
+ */
+export function alertInBackground(alert: Alert): void {
+  const sending = sendAlert(alert).catch(() => false);
+  try {
+    waitUntil(sending);
+  } catch {
+    // No platform context to register with; the floating promise above still completes.
   }
 }

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { makeRequest, readJsonResponse, validBody } from './helpers.js';
-import { mail, sentMail } from './mail-fake.js';
+import { detailsOf, expectEveryLeadField, fullBody, makeRequest, readJsonResponse, validBody } from './helpers.js';
+import { expectNoMail, mail, mails } from './mail-fake.js';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -26,7 +26,7 @@ describe('missing environment', () => {
     expect(line).toContain('SHEET_ID');
   });
 
-  it('mails the submitted lead, since a misconfigured sink loses it, and answers as before', async () => {
+  it('mails every field of the submitted lead, since a misconfigured sink loses it, and answers as before', async () => {
     vi.resetModules();
     vi.stubEnv('GOOGLE_SERVICE_ACCOUNT_EMAIL', '');
     vi.stubEnv('GOOGLE_PRIVATE_KEY', '');
@@ -34,15 +34,36 @@ describe('missing environment', () => {
     vi.stubEnv('ALERT_SMTP_PASS', 'app-password-placeholder');
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const { POST } = await import('../api/lead.js');
-    const out = await readJsonResponse(await POST(makeRequest('POST', validBody, { 'x-forwarded-for': '203.0.113.9' })));
+    const out = await readJsonResponse(await POST(makeRequest('POST', fullBody, { 'x-forwarded-for': '203.0.113.9' })));
     expect(out.status).toBe(500);
     expect(out.body).toEqual({ ok: false, error: 'server_misconfigured' });
-    expect(sentMail()).toHaveLength(1);
-    const { subject, text } = sentMail()[0]!;
-    expect(subject).toBe('[consulting.tridha.net] Lead NOT saved, server misconfigured: Asha Rao (Rao Textiles)');
-    for (const value of ['Asha Rao', 'asha@example.com', '+919812345678', 'Founder', 'raotextiles.in', 'meta', '203.0.113.9', 'SHEET_ID']) {
-      expect(text, value).toContain(value);
+    const sent = await mails();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.subject).toBe('[consulting.tridha.net] Lead NOT saved, server misconfigured: Asha Rao (Rao Textiles)');
+    expect(sent[0]!.text).toContain('SHEET_ID');
+    const details = detailsOf(sent[0]!.text) as { lead: Record<string, unknown>; ip: string; submittedAt: string };
+    expectEveryLeadField(details.lead);
+    expect(details.ip).toBe('203.0.113.9');
+    expect(details.submittedAt).toEqual(expect.any(String));
+  });
+
+  it('caps the mails at five per ten minutes, the last one saying so, however many senders there are', async () => {
+    vi.resetModules();
+    vi.stubEnv('GOOGLE_SERVICE_ACCOUNT_EMAIL', '');
+    vi.stubEnv('GOOGLE_PRIVATE_KEY', '');
+    vi.stubEnv('SHEET_ID', '');
+    vi.stubEnv('ALERT_SMTP_PASS', 'app-password-placeholder');
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { POST } = await import('../api/lead.js');
+    for (let i = 0; i < 8; i++) {
+      const out = await readJsonResponse(await POST(makeRequest('POST', validBody, { 'x-forwarded-for': `203.0.113.${i + 1}` })));
+      expect(out).toMatchObject({ status: 500, body: { ok: false, error: 'server_misconfigured' } });
     }
+    const sent = await mails();
+    expect(sent).toHaveLength(5);
+    expect(sent.slice(0, 4).every((m) => !m.text.includes('suppressed'))).toBe(true);
+    expect(sent[4]!.text).toContain('Further alerts of this type are suppressed for 10 minutes; see the Vercel logs');
+    expect(errSpy.mock.calls.filter((c) => String(c[0]).includes('LEAD_SINK_MISCONFIGURED'))).toHaveLength(8);
   });
 
   it('sends no mail when ALERT_SMTP_PASS is unset, and the response is the same', async () => {
@@ -56,7 +77,7 @@ describe('missing environment', () => {
     const out = await readJsonResponse(await POST(makeRequest('POST', validBody)));
     expect(out.status).toBe(500);
     expect(out.body).toEqual({ ok: false, error: 'server_misconfigured' });
-    expect(mail.createTransport).not.toHaveBeenCalled();
+    await expectNoMail();
   });
 
   it('env module throws a clear error at load', async () => {

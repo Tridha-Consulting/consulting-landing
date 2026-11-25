@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ALERT_DEADLINE_MS, MAX_BODY_BYTES, THROTTLE_MS, alertBody, resetAlertThrottle, sendAlert } from '../lib/alert.js';
+import { ALERT_DEADLINE_MS, MAX_BODY_BYTES, THROTTLE_MS, alertBody, alertInBackground, resetAlertThrottle, sendAlert } from '../lib/alert.js';
 import { mail, sentMail } from './mail-fake.js';
 
 let errSpy: ReturnType<typeof vi.spyOn>;
@@ -239,5 +239,167 @@ describe('alertBody', () => {
     const { text } = sentMail()[0]!;
     expect(text).toContain('[truncated');
     expect(Buffer.byteLength(text)).toBeLessThan(MAX_BODY_BYTES + 200);
+  });
+});
+
+describe('sendAlert, a failed send does not use up the throttle', () => {
+  const keyed = { ...basic, dedupeKey: 'booking-1' };
+
+  it('a rejected send leaves the key free, so a retry can alert', async () => {
+    configure();
+    mail.sendMail.mockRejectedValueOnce(new Error('smtp down'));
+    await expect(sendAlert(keyed)).resolves.toBe(false);
+    await expect(sendAlert(keyed)).resolves.toBe(true);
+    await expect(sendAlert(keyed)).resolves.toBe(false);
+    expect(mail.sendMail).toHaveBeenCalledTimes(2);
+  });
+
+  it('a send that timed out leaves the key free too', async () => {
+    vi.useFakeTimers();
+    configure();
+    mail.sendMail.mockReturnValueOnce(new Promise(() => {}));
+    const first = sendAlert(keyed);
+    await vi.advanceTimersByTimeAsync(ALERT_DEADLINE_MS + 1);
+    await expect(first).resolves.toBe(false);
+    await expect(sendAlert(keyed)).resolves.toBe(true);
+  });
+
+  it('a transport that cannot be created leaves the key free', async () => {
+    configure();
+    mail.createTransport.mockImplementationOnce(() => {
+      throw new Error('bad options');
+    });
+    await expect(sendAlert(keyed)).resolves.toBe(false);
+    await expect(sendAlert(keyed)).resolves.toBe(true);
+  });
+});
+
+describe('sendAlert, window cap', () => {
+  const capped = (n: number) => ({ ...basic, event: 'LEAD_SINK_MISCONFIGURED', dedupeKey: `lead-${n}` });
+
+  it('sends at most five mails per ten minutes for a capped event, whatever the keys, the fifth saying so', async () => {
+    vi.useFakeTimers();
+    configure();
+    for (let i = 0; i < 8; i++) await sendAlert(capped(i));
+    expect(mail.sendMail).toHaveBeenCalledTimes(5);
+    expect(sentMail().slice(0, 4).every((m) => !m.text.includes('suppressed'))).toBe(true);
+    expect(sentMail()[4]!.text).toContain('Further alerts of this type are suppressed for 10 minutes; see the Vercel logs');
+    expect(logged(warnSpy, 'ALERT_THROTTLED')).toMatchObject({ alertEvent: 'LEAD_SINK_MISCONFIGURED' });
+
+    await vi.advanceTimersByTimeAsync(THROTTLE_MS);
+    await sendAlert(capped(99));
+    expect(mail.sendMail).toHaveBeenCalledTimes(6);
+  });
+
+  it('is per event: other events are not counted, and an uncapped event is never limited by the cap', async () => {
+    configure();
+    for (let i = 0; i < 5; i++) await sendAlert(capped(i));
+    await sendAlert({ ...basic, event: 'LEAD_WRITE_FAILED', dedupeKey: 'a' });
+    for (let i = 0; i < 8; i++) await sendAlert({ ...basic, event: 'LEAD_WRITE_FAILED', dedupeKey: `k${i}` });
+    expect(mail.sendMail).toHaveBeenCalledTimes(5 + 9);
+  });
+
+  it('a failed send gives its slot back', async () => {
+    configure();
+    mail.sendMail.mockRejectedValue(new Error('smtp down'));
+    for (let i = 0; i < 8; i++) await sendAlert(capped(i));
+    expect(mail.sendMail).toHaveBeenCalledTimes(8);
+    mail.sendMail.mockResolvedValue({ accepted: [] });
+    for (let i = 10; i < 18; i++) await sendAlert(capped(i));
+    expect(mail.sendMail).toHaveBeenCalledTimes(8 + 5);
+  });
+});
+
+describe('sendAlert, time bound', () => {
+  it('passes sendMail an abort signal that fires by the deadline, so an open connection is closed', async () => {
+    configure();
+    await sendAlert(basic);
+    const { signal } = sentMail()[0]!;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal!.aborted).toBe(false);
+  });
+
+  it('the abort signal is the remainder of the deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    configure();
+    const spy = vi.spyOn(AbortSignal, 'timeout');
+    await sendAlert(basic);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]![0]).toBeLessThanOrEqual(ALERT_DEADLINE_MS);
+    expect(spy.mock.calls[0]![0]).toBeGreaterThan(0);
+  });
+
+  it('loading nodemailer counts toward the deadline', async () => {
+    vi.useFakeTimers();
+    configure();
+    vi.resetModules();
+    vi.doMock('nodemailer', () => new Promise(() => {}));
+    try {
+      const fresh = await import('../lib/alert.js');
+      let settled: boolean | undefined;
+      const done = fresh.sendAlert(basic).then((sent) => {
+        settled = sent;
+      });
+      await vi.advanceTimersByTimeAsync(ALERT_DEADLINE_MS - 1);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(2);
+      await done;
+      expect(settled).toBe(false);
+      expect(String(logged(errSpy, 'ALERT_SEND_FAILED')!.error)).toMatch(/timed out/);
+    } finally {
+      vi.doMock('nodemailer', async () => {
+        const { mail: fake } = await import('./mail-fake.js');
+        return { default: { createTransport: fake.createTransport }, createTransport: fake.createTransport };
+      });
+      vi.resetModules();
+    }
+  });
+});
+
+describe('subject', () => {
+  it('is cut by code point, never through a surrogate pair', async () => {
+    configure();
+    // The prefix is 24 characters; an emoji (two UTF-16 units) then sits across unit 150.
+    const prefixLength = '[consulting.tridha.net] '.length;
+    await sendAlert({ ...basic, subject: 'a'.repeat(150 - prefixLength - 1) + '\u{1F600}'.repeat(5) });
+    const { subject } = sentMail()[0]!;
+    expect(Array.from(subject)).toHaveLength(150);
+    expect(subject.endsWith(String.fromCodePoint(0x1f600))).toBe(true);
+    expect(subject).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    await sendAlert({ ...basic, subject: 'a'.repeat(150 - prefixLength - 1) + '\u{1F600}'.repeat(5) + 'tail' });
+    const cut = sentMail()[1]!.subject;
+    expect(Array.from(cut)).toHaveLength(150);
+    expect(cut).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+  });
+});
+
+describe('alertInBackground', () => {
+  it('returns at once, hands the send to waitUntil, and the mail goes out when it is awaited', async () => {
+    configure();
+
+    expect(alertInBackground(basic)).toBeUndefined();
+    expect(mail.waitUntil).toHaveBeenCalledTimes(1);
+    expect(mail.sendMail).not.toHaveBeenCalled();
+    await mail.flush();
+    expect(mail.sendMail).toHaveBeenCalledTimes(1);
+  });
+
+  it('still sends when waitUntil throws (no request context), and never throws itself', async () => {
+    configure();
+    mail.waitUntil.mockImplementation(() => {
+      throw new Error('no context');
+    });
+
+    expect(() => alertInBackground(basic)).not.toThrow();
+    await vi.waitFor(() => expect(mail.sendMail).toHaveBeenCalledTimes(1));
+  });
+
+  it('a failing send is logged and never an unhandled rejection', async () => {
+    configure();
+    mail.sendMail.mockRejectedValue(new Error('smtp down'));
+
+    alertInBackground(basic);
+    await mail.flush();
+    expect(logged(errSpy, 'ALERT_SEND_FAILED')).toMatchObject({ error: 'smtp down' });
   });
 });

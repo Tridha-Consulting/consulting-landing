@@ -1,4 +1,4 @@
-import { sendAlert } from '../lib/alert.js';
+import { alertInBackground } from '../lib/alert.js';
 import { SheetLayoutError } from '../lib/columns.js';
 import { safeEqual } from '../lib/safe-equal.js';
 
@@ -22,7 +22,7 @@ export async function POST(request: Request): Promise<Response> {
     const error = err instanceof Error ? err.message : String(err);
     console.error(JSON.stringify({ event: 'CALENDAR_NOTIFY_MISCONFIGURED', error }));
     // Reachable without the channel token, so the alert is throttled to one per window instead of one per request.
-    await sendAlert({
+    alertInBackground({
       event: 'CALENDAR_NOTIFY_MISCONFIGURED',
       subject: 'Calendar push endpoint cannot run: settings missing',
       summary: 'Google Calendar push notifications are answered with a 500, so booker declines are not synced to the Sheet except by the daily sweep.',

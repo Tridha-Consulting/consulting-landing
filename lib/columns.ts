@@ -1,5 +1,6 @@
 import { classifyChannel } from './channel.js';
 import type { EmailCheck } from './email-domain.js';
+import { formatIST } from './ist.js';
 import { BOTTLENECK_OPTIONS, type LeadInput } from './schema.js';
 
 /** Qualification answers. A lead from the site form always has them; a row built from a Cal booking alone may not. */
@@ -20,12 +21,7 @@ export interface Column {
   value: (lead: LeadRow) => string;
 }
 
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-
-/** `YYYY-MM-DD HH:mm:ss` in Asia/Kolkata (fixed +05:30, no DST). */
-export function formatIST(d: Date): string {
-  return new Date(d.getTime() + IST_OFFSET_MS).toISOString().slice(0, 19).replace('T', ' ');
-}
+export { formatIST };
 
 /** Values of the Status column. `New` is written by /api/lead, `Declined` by the calendar sync (lib/calendar-sync.ts), the rest by /api/cal-webhook. */
 export const STATUS = {

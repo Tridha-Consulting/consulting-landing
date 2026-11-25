@@ -1,3 +1,4 @@
+import { expect } from 'vitest';
 import { BOTTLENECK_OPTIONS, BUDGET_OPTIONS, DECISION_MAKER_OPTIONS, REVENUE_OPTIONS, TECH_TEAM_OPTIONS, TIMELINE_OPTIONS } from '../lib/schema.js';
 
 export const validBody = {
@@ -30,4 +31,44 @@ export function makeRequest(method: string, body?: unknown, headers: Record<stri
 export async function readJsonResponse(res: Response): Promise<{ status: number; headers: Headers; body: unknown }> {
   const text = await res.text();
   return { status: res.status, headers: res.headers, body: text ? JSON.parse(text) : undefined };
+}
+
+/**
+ * A lead with every field of the form filled with a value of its own, so a mail that drops or swaps a field is
+ * noticed: the 12 answers (name, email, phone and nine questions), the 13 attribution fields, nothing else.
+ */
+export const fullBody = {
+  ...validBody,
+  fullName: 'Asha Rao',
+  designation: 'Founder and Director',
+  company: 'Rao Textiles',
+  website: 'raotextiles.in',
+  utmSource: 'utmSource-value',
+  utmMedium: 'utmMedium-value',
+  utmCampaign: 'utmCampaign-value',
+  utmContent: 'utmContent-value',
+  utmTerm: 'utmTerm-value',
+  fbclid: 'fbclid-value',
+  gclid: 'gclid-value',
+  liFatId: 'liFatId-value',
+  twclid: 'twclid-value',
+  gbraid: 'gbraid-value',
+  wbraid: 'wbraid-value',
+  referrer: 'https://referrer.example.com/page',
+  landingUrl: 'https://consulting.tridha.net/?utm_source=utmSource-value',
+};
+
+/** The JSON that follows "Details:" in an alert body. */
+export function detailsOf(text: string): Record<string, unknown> {
+  const at = text.indexOf('\nDetails:\n');
+  if (at < 0) throw new Error('no Details section in the mail body');
+  return JSON.parse(text.slice(at + '\nDetails:\n'.length)) as Record<string, unknown>;
+}
+
+/** Every field of `fullBody` is in `lead`, each with the value it was sent with (the 12 answers and 13 attribution fields). */
+export function expectEveryLeadField(lead: Record<string, unknown>): void {
+  expect(Object.keys(fullBody)).toHaveLength(12 + 13);
+  const values = Object.values(fullBody).map((v) => JSON.stringify(v));
+  expect(new Set(values).size, 'fixture values are distinct').toBe(values.length);
+  for (const [key, value] of Object.entries(fullBody)) expect(lead[key], key).toEqual(value);
 }

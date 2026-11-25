@@ -53,9 +53,12 @@ describe('sendAlert, not configured', () => {
 
 describe('sendAlert, configured', () => {
   it('sends plain text from the mailbox to itself by default, over implicit TLS on smtp.zoho.in', async () => {
-    configure();
+    // The one test of the default host: setup points every other test at an unroutable address. The send goes
+    // through the fake transport, so nothing reaches the real server.
+    configure({ ALERT_SMTP_HOST: '' });
     await sendAlert(basic);
     expect(mail.createTransport).toHaveBeenCalledTimes(1);
+    expect(mail.sendMail).toHaveBeenCalledTimes(1);
     const options = mail.createTransport.mock.calls[0]![0] as Record<string, unknown>;
     expect(options).toMatchObject({
       host: 'smtp.zoho.in',
@@ -115,6 +118,42 @@ describe('sendAlert, configured', () => {
     await sendAlert(basic);
     expect(JSON.stringify(sentMail())).not.toContain('app-password-placeholder');
     expect(JSON.stringify([...errSpy.mock.calls, ...warnSpy.mock.calls])).not.toContain('app-password-placeholder');
+  });
+});
+
+describe('sendAlert, concurrent alerts', () => {
+  it('five alerts started together all reach the transport, none the real module', async () => {
+    configure();
+    const results = await Promise.all(Array.from({ length: 5 }, (_, i) => sendAlert({ ...basic, dedupeKey: `k${i}` })));
+    expect(results).toEqual([true, true, true, true, true]);
+    expect(mail.createTransport).toHaveBeenCalledTimes(5);
+    expect(mail.sendMail).toHaveBeenCalledTimes(5);
+    // setup.ts points the host at TEST-NET-1 unless a test asks for the default.
+    for (const call of mail.createTransport.mock.calls) expect((call[0] as { host: string }).host).toBe('192.0.2.1');
+  });
+
+  it('a failed import is forgotten, so the next alert loads it again', async () => {
+    vi.useFakeTimers();
+    configure();
+    vi.resetModules();
+    let attempts = 0;
+    vi.doMock('nodemailer', () => {
+      attempts++;
+      if (attempts === 1) throw new Error('cannot load');
+      return { default: { createTransport: mail.createTransport }, createTransport: mail.createTransport };
+    });
+    try {
+      const fresh = await import('../lib/alert.js');
+      await expect(fresh.sendAlert(basic)).resolves.toBe(false);
+      expect(logged(errSpy, 'ALERT_SEND_FAILED')).toMatchObject({ alertEvent: 'TEST_EVENT' });
+      await expect(fresh.sendAlert(basic)).resolves.toBe(true);
+    } finally {
+      vi.doMock('nodemailer', async () => {
+        const { mail: fake } = await import('./mail-fake.js');
+        return { default: { createTransport: fake.createTransport }, createTransport: fake.createTransport };
+      });
+      vi.resetModules();
+    }
   });
 });
 

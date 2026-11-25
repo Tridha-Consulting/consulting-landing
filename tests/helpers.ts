@@ -72,3 +72,14 @@ export function expectEveryLeadField(lead: Record<string, unknown>): void {
   expect(new Set(values).size, 'fixture values are distinct').toBe(values.length);
   for (const [key, value] of Object.entries(fullBody)) expect(lead[key], key).toEqual(value);
 }
+
+/** The submission context of a mail's Details: the browser's proposed lead id, its User-Agent and its ip. */
+export function expectSubmissionContext(details: Record<string, unknown>, expected: { leadId: string; userAgent: string; ip: string }): void {
+  expect(details.leadId, 'leadId').toBe(expected.leadId);
+  expect(details.userAgent, 'userAgent').toBe(expected.userAgent);
+  expect(details.ip, 'ip').toBe(expected.ip);
+  expect(details.submittedAt, 'submittedAt').toEqual(expect.any(String));
+}
+
+/** A lead id as the browser proposes it (a UUID v4). */
+export const PROPOSED_ID = '9b2f3c1e-5d4a-4f6b-8a7c-1e2d3f4a5b6c';

@@ -5,7 +5,7 @@ import { fixTokenFor } from '../lib/fix-token.js';
 import { resetLeadRateLimit } from '../lib/rate-limit.js';
 import { ALERT_DEADLINE_MS, resetAlertThrottle } from '../lib/alert.js';
 import { BOTTLENECK_OPTIONS } from '../lib/schema.js';
-import { detailsOf, expectEveryLeadField, fullBody, makeRequest, readJsonResponse, validBody } from './helpers.js';
+import { PROPOSED_ID, detailsOf, expectEveryLeadField, expectSubmissionContext, fullBody, makeRequest, readJsonResponse, validBody } from './helpers.js';
 import { expectNoMail, mail, mails } from './mail-fake.js';
 
 const write = vi.fn();
@@ -525,7 +525,7 @@ describe('failure alerts', () => {
   it('an unreachable captcha check drops the lead, so it mails the lead as submitted, and answers 502 as before', async () => {
     vi.stubEnv('TURNSTILE_SECRET_KEY', 'secret');
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')));
-    const out = await call('POST', { ...fullBody, turnstileToken: 'tok' }, { 'x-forwarded-for': '203.0.113.9' });
+    const out = await call('POST', { ...fullBody, leadId: PROPOSED_ID, turnstileToken: 'tok' }, { 'x-forwarded-for': '203.0.113.9', 'user-agent': 'UA/1' });
     expect(out.statusCode).toBe(502);
     expect(out.body).toEqual({ ok: false, error: 'captcha_unavailable' });
     expect(write).not.toHaveBeenCalled();
@@ -533,10 +533,10 @@ describe('failure alerts', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]!.subject).toBe('[consulting.tridha.net] Lead NOT saved (captcha check unavailable): Asha Rao (Rao Textiles)');
     expect(sent[0]!.text).toContain('fetch failed');
-    const details = detailsOf(sent[0]!.text) as { lead: Record<string, unknown>; ip: string };
+    const details = detailsOf(sent[0]!.text) as { lead: Record<string, unknown> };
     expectEveryLeadField(details.lead);
     expect(details.lead).not.toHaveProperty('turnstileToken');
-    expect(details.ip).toBe('203.0.113.9');
+    expectSubmissionContext(details, { leadId: PROPOSED_ID, userAgent: 'UA/1', ip: '203.0.113.9' });
   });
 
   it('an unreachable captcha check with a body that has no usable name still mails, and answers as before', async () => {

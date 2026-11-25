@@ -1,8 +1,9 @@
 import { expect, vi } from 'vitest';
 
-// The nodemailer and @vercel/functions doubles every test runs against (tests/setup.ts mocks both packages
-// with them), so no test can open an SMTP connection. Endpoints send alerts after the response through
-// waitUntil: the promises it is given are kept here, and `flush` waits for them. The spies live on globalThis
+// The doubles every test runs against, so no test can open an SMTP connection: tests/setup.ts mocks nodemailer
+// with the transport here and installs a request context (the one the Vercel platform provides) whose waitUntil
+// is the spy here. Endpoints send alerts after the response through waitUntil: the promises it is given are
+// kept here, and `flush` waits for them. The spies live on globalThis
 // because vi.resetModules() reloads this file and the tests still hold the instances they first imported.
 interface Mail {
   sendMail: ReturnType<typeof vi.fn>;
@@ -14,7 +15,12 @@ interface Mail {
   /** Waits until every alert started so far has finished. */
   flush(): Promise<void>;
   reset(): void;
+  /** Removes the request context, as when code runs outside a Vercel request. */
+  clearContext(): void;
 }
+
+/** Where the platform keeps the request context (the symbol @vercel/functions reads). */
+export const REQUEST_CONTEXT = Symbol.for('@vercel/request-context');
 
 const store = globalThis as { __mailFake?: Mail };
 
@@ -35,6 +41,9 @@ export const mail: Mail = (store.__mailFake ??= (() => {
         await Promise.all(self.background);
       }
     },
+    clearContext() {
+      delete (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT];
+    },
     reset() {
       sendMail.mockReset().mockResolvedValue({ accepted: [] });
       close.mockReset();
@@ -43,6 +52,7 @@ export const mail: Mail = (store.__mailFake ??= (() => {
       waitUntil.mockReset().mockImplementation((p: Promise<unknown>) => {
         self.background.push(p);
       });
+      (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = { get: () => ({ waitUntil: (p: Promise<unknown>) => waitUntil(p) }) };
     },
   };
   self.reset();

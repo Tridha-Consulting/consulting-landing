@@ -36,6 +36,11 @@ async function verifyTurnstile(secret: string, token: unknown, ip: string): Prom
   return { success: data.success === true, errorCodes: data['error-codes'] ?? [] };
 }
 
+/** The User-Agent header, capped like the stored column. */
+function userAgentOf(request: Request): string {
+  return (request.headers.get('user-agent') ?? '').slice(0, 500);
+}
+
 /** "name (company)" of a body that has not been validated yet, for an alert subject; never throws on a wrong type. */
 function submitterLabel(body: Record<string, unknown>): string {
   const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : 'unknown');
@@ -86,7 +91,7 @@ export async function POST(request: Request): Promise<Response> {
         subject: `Lead NOT saved (captcha check unavailable): ${submitterLabel(body)}`,
         summary: 'A lead submitted the form, but the captcha check could not reach Cloudflare, so the lead was dropped and NOT saved. The submitted answers are below; contact the lead or add them to the Sheet by hand.',
         error,
-        details: { lead: submittedLead(body), ip, submittedAt: new Date().toISOString() },
+        details: { lead: submittedLead(body), leadId: proposedLeadId(body.leadId), ip, userAgent: userAgentOf(request), submittedAt: new Date().toISOString() },
         dedupeKey: proposedLeadId(body.leadId),
       });
       return json(502, { ok: false, error: 'captcha_unavailable' });
@@ -182,7 +187,7 @@ async function storeLead(request: Request, data: LeadInput, ip: string, proposed
       subject: `Lead NOT saved, server misconfigured: ${data.fullName} (${data.company})`,
       summary: 'A lead submitted the form, but no Sheet is configured to store it, so it was NOT saved. The submitted answers are below; add them to the Sheet by hand, then fix the environment variables.',
       error,
-      details: { lead: data, ip, submittedAt: new Date().toISOString() },
+      details: { lead: data, leadId: proposed, ip, userAgent: userAgentOf(request), submittedAt: new Date().toISOString() },
       dedupeKey: proposed,
     });
     return { status: 500, body: { ok: false, error: 'server_misconfigured' } };
@@ -206,7 +211,7 @@ async function storeLead(request: Request, data: LeadInput, ip: string, proposed
     ...data,
     leadId,
     submittedAt: new Date(),
-    userAgent: (request.headers.get('user-agent') ?? '').slice(0, 500),
+    userAgent: userAgentOf(request),
     ip,
     emailCheck,
   };

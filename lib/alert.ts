@@ -1,4 +1,3 @@
-import { waitUntil } from '@vercel/functions';
 import { formatIST } from './ist.js';
 
 // Failure alerts: one plain-text email to the team through the Zoho mailbox, sent from the failure paths of
@@ -33,6 +32,18 @@ const MAX_SUBJECT_CHARS = 150;
 const SUBJECT_PREFIX = '[consulting.tridha.net] ';
 const DEFAULT_USER = 'consulting@tridha.net';
 const DEFAULT_HOST = 'smtp.zoho.in';
+
+/**
+ * The platform's request context, found where @vercel/functions looks for it (its get-context.js). Reading the
+ * symbol here keeps that package, and the load time it adds, out of every endpoint;
+ * tests/wait-until-contract.test.ts pins this lookup to the package's own waitUntil.
+ */
+const REQUEST_CONTEXT = Symbol.for('@vercel/request-context');
+type RequestContext = { waitUntil?: (promise: Promise<unknown>) => void };
+
+/** nodemailer, loaded by the first alert and shared by the alerts that follow, which may run at once. */
+let mailer: Promise<typeof import('nodemailer')> | undefined;
+let noWaitUntilLogged = false;
 
 /** When each throttle key was last sent. */
 const sentAt = new Map<string, number>();
@@ -121,10 +132,11 @@ function reserve(alert: Alert, now: number): Slot | null {
   };
 }
 
-/** Clears the throttle; for tests. */
+/** Clears the throttle and the once-per-instance notice; for tests. */
 export function resetAlertThrottle(): void {
   sentAt.clear();
   capSends.clear();
+  noWaitUntilLogged = false;
 }
 
 /**
@@ -138,6 +150,8 @@ export async function sendAlert(alert: Alert): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let transport: { close(): void } | undefined;
   let slot: Slot | null = null;
+  let loading: typeof mailer;
+  let imported = false;
   try {
     // Read per call, not at module load, so the site runs unchanged without these set.
     const pass = process.env.ALERT_SMTP_PASS?.trim();
@@ -161,7 +175,10 @@ export async function sendAlert(alert: Alert): Promise<boolean> {
       timer = setTimeout(() => reject(new Error(`timed out after ${ALERT_DEADLINE_MS} ms`)), ALERT_DEADLINE_MS);
     });
     const delivery = (async () => {
-      const nodemailer = await import('nodemailer');
+      // One import for alerts that run at once. If it fails or hangs past the deadline it is forgotten below.
+      loading = mailer ??= import('nodemailer');
+      const nodemailer = await loading;
+      imported = true;
       const created = nodemailer.createTransport({
         host,
         port: 465,
@@ -187,6 +204,7 @@ export async function sendAlert(alert: Alert): Promise<boolean> {
     return true;
   } catch (err) {
     slot?.release();
+    if (!imported && mailer === loading) mailer = undefined;
     logFailure(alert.event, err);
     return false;
   } finally {
@@ -201,13 +219,30 @@ export async function sendAlert(alert: Alert): Promise<boolean> {
 
 /**
  * Starts the alert and returns at once: the mail is sent after the response, kept alive by the platform's
- * waitUntil. Without a request context (local runs, tests) the promise simply runs on. Never throws.
+ * waitUntil (registerWaitUntil). Never throws.
  */
 export function alertInBackground(alert: Alert): void {
   const sending = sendAlert(alert).catch(() => false);
+  if (registerWaitUntil(sending)) return;
+  // On Vercel a missing waitUntil means the mail may be cut off with the function; say so once.
+  if (process.env.VERCEL && !noWaitUntilLogged) {
+    noWaitUntilLogged = true;
+    console.error(JSON.stringify({ event: 'ALERT_NO_WAITUNTIL', alertEvent: alert.event }));
+  }
+}
+
+/**
+ * Asks the platform to keep the function alive until `promise` settles. False when there is no request
+ * context to ask (local runs, tests), in which case the promise simply runs on. Never throws.
+ */
+export function registerWaitUntil(promise: Promise<unknown>): boolean {
   try {
-    waitUntil(sending);
+    const store = (globalThis as Record<symbol, { get?: () => RequestContext | undefined } | undefined>)[REQUEST_CONTEXT];
+    const context = store?.get?.();
+    if (typeof context?.waitUntil !== 'function') return false;
+    context.waitUntil(promise);
+    return true;
   } catch {
-    // No platform context to register with; the floating promise above still completes.
+    return false;
   }
 }

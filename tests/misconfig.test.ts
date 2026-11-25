@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { detailsOf, expectEveryLeadField, fullBody, makeRequest, readJsonResponse, validBody } from './helpers.js';
+import { PROPOSED_ID, detailsOf, expectEveryLeadField, expectSubmissionContext, fullBody, makeRequest, readJsonResponse, validBody } from './helpers.js';
 import { expectNoMail, mail, mails } from './mail-fake.js';
 
 afterEach(() => {
@@ -34,17 +34,16 @@ describe('missing environment', () => {
     vi.stubEnv('ALERT_SMTP_PASS', 'app-password-placeholder');
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const { POST } = await import('../api/lead.js');
-    const out = await readJsonResponse(await POST(makeRequest('POST', fullBody, { 'x-forwarded-for': '203.0.113.9' })));
+    const out = await readJsonResponse(await POST(makeRequest('POST', { ...fullBody, leadId: PROPOSED_ID }, { 'x-forwarded-for': '203.0.113.9', 'user-agent': 'UA/1' })));
     expect(out.status).toBe(500);
     expect(out.body).toEqual({ ok: false, error: 'server_misconfigured' });
     const sent = await mails();
     expect(sent).toHaveLength(1);
     expect(sent[0]!.subject).toBe('[consulting.tridha.net] Lead NOT saved, server misconfigured: Asha Rao (Rao Textiles)');
     expect(sent[0]!.text).toContain('SHEET_ID');
-    const details = detailsOf(sent[0]!.text) as { lead: Record<string, unknown>; ip: string; submittedAt: string };
+    const details = detailsOf(sent[0]!.text) as { lead: Record<string, unknown> };
     expectEveryLeadField(details.lead);
-    expect(details.ip).toBe('203.0.113.9');
-    expect(details.submittedAt).toEqual(expect.any(String));
+    expectSubmissionContext(details, { leadId: PROPOSED_ID, userAgent: 'UA/1', ip: '203.0.113.9' });
   });
 
   it('caps the mails at five per ten minutes, the last one saying so, however many senders there are', async () => {

@@ -15,6 +15,7 @@ import {
   resetFakes,
 } from './calendar-fakes.js';
 import { readJsonResponse } from './helpers.js';
+import { mail, sentMail } from './mail-fake.js';
 
 vi.mock('google-auth-library', async () => {
   const actual = await vi.importActual<typeof import('google-auth-library')>('google-auth-library');
@@ -300,5 +301,88 @@ describe('configuration', () => {
     await expect(import('../api/cal-webhook.js')).resolves.toBeTruthy();
     await expect(import('../lib/env.js')).resolves.toBeTruthy();
     await expect(import('../lib/calendar-env.js')).rejects.toThrow(/CALENDAR_ID, CALENDAR_CHANNEL_TOKEN/);
+  });
+});
+
+describe('failure alerts', () => {
+  beforeEach(() => {
+    vi.stubEnv('ALERT_SMTP_PASS', 'app-password-placeholder');
+  });
+
+  const subjects = () => sentMail().map((m) => m.subject);
+  const loadCron = () => import('../api/calendar-cron.js');
+  const loadNotify = () => import('../api/calendar-notify.js');
+
+  it('a sweep failure mails, and the cron answers as before', async () => {
+    fake.failList = true;
+    const { GET } = await loadCron();
+    const out = await readJsonResponse(await GET(cronRequest(goodCron)));
+    expect(out).toMatchObject({ status: 500, body: { ok: false, swept: null, channelExpiresAt: new Date(WATCH_EXPIRATION_MS).toISOString() } });
+    expect(subjects()).toEqual(['[consulting.tridha.net] Daily calendar decline sweep failed']);
+    expect(sentMail()[0]!.text).toContain('CALENDAR_SWEEP_FAILED');
+  });
+
+  it('a failed push-channel renewal mails, and the sweep still runs', async () => {
+    fake.sheet.push(leadRow({ status: STATUS.booked, uid: 'u1' }));
+    fake.events = [calEvent({ uid: 'u1', response: 'declined' })];
+    fake.failWatch = true;
+    const { GET } = await loadCron();
+    const out = await readJsonResponse(await GET(cronRequest(goodCron)));
+    expect(out).toMatchObject({ status: 500, body: { ok: false, swept: 1, changed: 1, channelExpiresAt: null } });
+    expect(fake.sheet[1]![COL['Status']!]).toBe('Declined');
+    expect(subjects()).toEqual(['[consulting.tridha.net] Calendar push channel not renewed']);
+  });
+
+  it('a failing sweep and a failing renewal mail separately', async () => {
+    fake.failList = true;
+    fake.failWatch = true;
+    const { GET } = await loadCron();
+    expect((await GET(cronRequest(goodCron))).status).toBe(500);
+    expect(subjects()).toEqual(['[consulting.tridha.net] Daily calendar decline sweep failed', '[consulting.tridha.net] Calendar push channel not renewed']);
+  });
+
+  it('a missing CRON_SECRET and missing calendar settings mail, and the cron answers 500 as before', async () => {
+    stubEnv({ cronSecret: '' });
+    expect((await (await loadCron()).GET(cronRequest(goodCron))).status).toBe(500);
+    expect(subjects()).toEqual(['[consulting.tridha.net] Daily calendar job cannot run: CRON_SECRET missing']);
+
+    vi.resetModules();
+    stubEnv({ token: '' });
+    const out = await readJsonResponse(await (await loadCron()).GET(cronRequest(goodCron)));
+    expect(out).toMatchObject({ status: 500, body: { ok: false, error: 'server_misconfigured' } });
+    expect(subjects()[1]).toBe('[consulting.tridha.net] Daily calendar job cannot run: calendar settings missing');
+    expect(sentMail()[1]!.text).toContain('CALENDAR_CHANNEL_TOKEN');
+  });
+
+  it('an unauthorized cron call sends no mail', async () => {
+    const { GET } = await loadCron();
+    expect((await GET(cronRequest({ authorization: 'Bearer nope' }))).status).toBe(401);
+    expect((await GET(cronRequest())).status).toBe(401);
+    expect(mail.createTransport).not.toHaveBeenCalled();
+  });
+
+  it('a successful cron run sends no mail', async () => {
+    const { GET } = await loadCron();
+    expect((await GET(cronRequest(goodCron))).status).toBe(200);
+    expect(mail.createTransport).not.toHaveBeenCalled();
+  });
+
+  it('missing calendar settings on the push endpoint mail once however often it is called, and answer 500 as before', async () => {
+    stubEnv({ calendarId: '', token: '' });
+    const { POST } = await loadNotify();
+    for (let i = 0; i < 3; i++) {
+      const out = await readJsonResponse(await POST(notifyRequest(goodPush)));
+      expect(out).toMatchObject({ status: 500, body: { ok: false, error: 'server_misconfigured' } });
+    }
+    expect(subjects()).toEqual(['[consulting.tridha.net] Calendar push endpoint cannot run: settings missing']);
+    expect(sentMail()[0]!.text).toContain('CALENDAR_ID');
+  });
+
+  it('a bad push token and a sync failure send no mail', async () => {
+    const { POST } = await loadNotify();
+    expect((await POST(notifyRequest({ 'x-goog-channel-token': 'nope', 'x-goog-resource-state': 'exists' }))).status).toBe(401);
+    fake.failList = true;
+    expect((await POST(notifyRequest(goodPush))).status).toBe(500);
+    expect(mail.createTransport).not.toHaveBeenCalled();
   });
 });

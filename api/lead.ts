@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { sendAlert } from '../lib/alert.js';
 import { classifyChannel } from '../lib/channel.js';
 import { EMAIL_CHECK, checkEmailDomain } from '../lib/email-domain.js';
 import { EVENT_LOG_DEADLINE_MS, logEvents } from '../lib/event-log.js';
@@ -164,7 +165,17 @@ async function storeLead(request: Request, data: LeadInput, ip: string, proposed
     ({ sinks } = await import('../lib/sinks/index.js'));
   } catch (err) {
     // Missing env fails module load. Never report success when nothing can store the lead.
-    console.error(JSON.stringify({ event: 'LEAD_SINK_MISCONFIGURED', error: err instanceof Error ? err.message : String(err) }));
+    const error = err instanceof Error ? err.message : String(err);
+    console.error(JSON.stringify({ event: 'LEAD_SINK_MISCONFIGURED', error }));
+    // The lead is lost here, so the alert carries what was submitted, for the team to enter by hand.
+    await sendAlert({
+      event: 'LEAD_SINK_MISCONFIGURED',
+      subject: `Lead NOT saved, server misconfigured: ${data.fullName} (${data.company})`,
+      summary: 'A lead submitted the form, but no Sheet is configured to store it, so it was NOT saved. The submitted answers are below; add them to the Sheet by hand, then fix the environment variables.',
+      error,
+      details: { lead: data, ip, submittedAt: new Date().toISOString() },
+      dedupeKey: proposed,
+    });
     return { status: 500, body: { ok: false, error: 'server_misconfigured' } };
   }
 
@@ -193,16 +204,31 @@ async function storeLead(request: Request, data: LeadInput, ip: string, proposed
 
   const results = await Promise.allSettled(sinks.map((s) => s.write(lead)));
   let written = 0;
+  const failures: { sink: string | undefined; error: string }[] = [];
   results.forEach((r, i) => {
     if (r.status === 'fulfilled') {
       written++;
       return;
     }
     const error = r.reason instanceof Error ? r.reason.message : String(r.reason);
+    failures.push({ sink: sinks[i]?.name, error });
     // The full lead is logged on purpose: Vercel logs are the recovery path for a lost write.
     console.error(JSON.stringify({ event: 'LEAD_WRITE_FAILED', sink: sinks[i]?.name, error, lead }));
   });
 
+  if (failures.length) {
+    const lost = written === 0;
+    await sendAlert({
+      event: 'LEAD_WRITE_FAILED',
+      subject: lost ? `Lead NOT saved: ${lead.fullName} (${lead.company})` : `Lead saved, but sink failed: ${lead.fullName} (${lead.company})`,
+      summary: lost
+        ? 'A lead submitted the form and could NOT be saved to any sink. The full lead is below; add it to the Sheet by hand.'
+        : 'A lead was saved to some sinks but not to the ones listed under failures. The full lead is below.',
+      error: failures.map((f) => `${f.sink ?? 'unknown sink'}: ${f.error}`).join('; '),
+      details: { lead, failures },
+      dedupeKey: lead.leadId,
+    });
+  }
   if (written === 0) return { status: 502, body: { ok: false, error: 'write_failed' } };
 
   console.log(JSON.stringify({ event: 'LEAD_WRITTEN', leadId: lead.leadId, emailCheck }));

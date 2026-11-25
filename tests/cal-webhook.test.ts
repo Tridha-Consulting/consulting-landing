@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HEADERS, LAST_COLUMN_LETTER, MANUAL_HEADERS, columnLetter, toRow, type LeadRow } from '../lib/columns.js';
 import { ANSWER_COLUMNS, parseBooking, planBooking, type Booking } from '../lib/cal-booking.js';
 import { readJsonResponse } from './helpers.js';
+import { mail, sentMail } from './mail-fake.js';
 
 // Real JWT + real gaxios; only the network is stubbed, with an in-memory sheet behind it so a
 // replayed webhook is judged against the state the first delivery actually left.
@@ -1562,5 +1563,95 @@ describe('team-only columns are never written by the webhook', () => {
     expect(sheet[1]![COL['Status']!]).toBe('Booked');
     expect(decodeURIComponent(calls[0]!.url.pathname)).toContain(`!A:${LAST_COLUMN_LETTER}`);
     expect(LAST_COLUMN_LETTER).toBe('AP');
+  });
+});
+
+describe('failure alerts', () => {
+  beforeEach(() => {
+    vi.stubEnv('ALERT_SMTP_PASS', 'app-password-placeholder');
+  });
+
+  const subjects = () => sentMail().map((m) => m.subject);
+
+  it('a write failure mails the trigger, the error and the payload, and answers 502 as before', async () => {
+    sheetsHandler = () => Response.json({ error: { message: 'boom' } }, { status: 500 });
+    const h = await loadHandler();
+    const out = await post(h, calRequest(event('BOOKING_CREATED', booking({ uid: 'bk_lost' }))));
+    expect(out).toMatchObject({ status: 502, body: { ok: false, error: 'write_failed' } });
+    expect(sentMail()).toHaveLength(1);
+    const { subject, text } = sentMail()[0]!;
+    expect(subject).toBe('[consulting.tridha.net] Cal.com BOOKING_CREATED booking not written to the Sheet');
+    for (const value of ['BOOKING_CREATED', 'bk_lost', 'Asha@Example.com', 'Rao & Co', 'boom']) expect(text, value).toContain(value);
+  });
+
+  it('Cal retrying the same booking and trigger is mailed once; another booking is mailed too', async () => {
+    sheetsHandler = () => Response.json({ error: { message: 'boom' } }, { status: 500 });
+    const h = await loadHandler();
+    const created = (uid: string) => calRequest(event('BOOKING_CREATED', booking({ uid })));
+    for (let i = 0; i < 3; i++) expect((await post(h, created('bk_a'))).status).toBe(502);
+    expect(sentMail()).toHaveLength(1);
+    await post(h, created('bk_b'));
+    await post(h, calRequest(event('BOOKING_CANCELLED', booking({ uid: 'bk_a' }))));
+    expect(sentMail()).toHaveLength(3);
+  });
+
+  it('a Sheet header mismatch mails, and answers 500 as before', async () => {
+    sheet = [['Full Name', 'Email']];
+    const h = await loadHandler();
+    const out = await post(h, calRequest(event('BOOKING_CREATED', booking({ uid: 'bk_layout' }))));
+    expect(out).toMatchObject({ status: 500, body: { ok: false, error: 'server_misconfigured' } });
+    expect(subjects()).toEqual(['[consulting.tridha.net] Cal.com BOOKING_CREATED booking NOT recorded: Sheet header row is wrong']);
+    expect(sentMail()[0]!.text).toContain('bk_layout');
+  });
+
+  it('missing Sheet environment mails the payload, and answers 500 as before', async () => {
+    const h = await loadHandler({ sheet: false });
+    const out = await post(h, calRequest(event('BOOKING_CREATED', booking({ uid: 'bk_env' }))));
+    expect(out).toMatchObject({ status: 500, body: { ok: false, error: 'server_misconfigured' } });
+    expect(subjects()).toEqual(['[consulting.tridha.net] Cal.com BOOKING_CREATED booking NOT recorded: server misconfigured']);
+    expect(sentMail()[0]!.text).toContain('bk_env');
+  });
+
+  it('a missing webhook secret mails once, however many requests arrive', async () => {
+    const h = await loadHandler({ secret: ' ' });
+    for (let i = 0; i < 3; i++) expect((await post(h, calRequest(event('PING', {})))).status).toBe(500);
+    expect(subjects()).toEqual(['[consulting.tridha.net] Cal.com webhook cannot verify bookings: secret missing']);
+  });
+
+  it('a signed payload that fails the schema mails, and answers 400 as before', async () => {
+    const h = await loadHandler();
+    const out = await post(h, calRequest(event('BOOKING_CREATED', { uid: 'bk_schema', startTime: 'x', attendees: [] })));
+    expect(out).toMatchObject({ status: 400, body: { ok: false, error: 'invalid_payload' } });
+    expect(subjects()).toEqual(['[consulting.tridha.net] Cal.com BOOKING_CREATED webhook has an unusable payload']);
+    expect(sentMail()[0]!.text).toContain('bk_schema');
+  });
+
+  it('a signed body that is not JSON mails the raw body, and answers 400 as before', async () => {
+    const h = await loadHandler();
+    const raw = '{"triggerEvent":"BOOKING_CREATED","payload":{"uid":"MARKER_JSON"';
+    const out = await post(h, calRequest(raw));
+    expect(out).toMatchObject({ status: 400, body: { ok: false, error: 'invalid_json' } });
+    expect(sentMail()).toHaveLength(1);
+    expect(sentMail()[0]!.text).toContain('MARKER_JSON');
+  });
+
+  it('a bad signature, an oversized body, a ping and a synced booking send no mail', async () => {
+    const h = await loadHandler();
+    const raw = JSON.stringify(event('PING', {}));
+    expect((await post(h, calRequest(raw, { 'x-cal-signature-256': sign(raw, 'other') }))).status).toBe(401);
+    expect((await post(h, calRequest(event('PING', {}), 'unsigned'))).status).toBe(401);
+    expect((await post(h, calRequest('x'.repeat(64 * 1024 + 1)))).status).toBe(413);
+    expect((await post(h, calRequest(event('PING', {})))).status).toBe(200);
+    expect((await post(h, calRequest(event('BOOKING_CREATED', booking())))).status).toBe(200);
+    expect(mail.createTransport).not.toHaveBeenCalled();
+  });
+
+  it('a mail that cannot be sent changes nothing in the response', async () => {
+    sheetsHandler = () => Response.json({ error: { message: 'boom' } }, { status: 500 });
+    mail.sendMail.mockRejectedValue(new Error('smtp down'));
+    const h = await loadHandler();
+    const out = await post(h, calRequest(event('BOOKING_CREATED', booking())));
+    expect(out).toMatchObject({ status: 502, body: { ok: false, error: 'write_failed' } });
+    expect(logged(console.error as never, 'ALERT_SEND_FAILED')).toContain('smtp down');
   });
 });

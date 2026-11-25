@@ -9,6 +9,7 @@ Static landing page plus one Vercel serverless function that appends leads to a 
 - `js/booking.js`, `book.html`: the Cal.com inline booking embed, used by the modal and by `/book` (see Cal.com booking).
 - `api/cal-webhook.ts`: Cal.com booking webhook that updates the lead's row (see "Cal.com webhook"). `lib/cal-booking.ts` (parse + row matching, pure), `lib/cal-sheet.ts` + `lib/sheets-client.ts` (Sheets I/O shared with the lead sink).
 - `api/calendar-notify.ts`, `api/calendar-cron.ts`: flag a booker who declines the Google invite (see "Google Calendar declines"). `lib/calendar-sync.ts` (decision + Status write), `lib/calendar-client.ts` (read-only Calendar API), `lib/calendar-env.ts`.
+- `lib/alert.ts`: the failure-alert email, sent from the failure paths of the API endpoints (see "Failure alerts"). `scripts/test-alert.ts` sends one test alert.
 - `robots.txt`, `sitemap.xml`, `llms.txt`: what crawlers may fetch, the one page to index, and a summary for language models (see "Search and AI visibility").
 - `lib/channel.ts` (`classifyChannel`, pure: which marketing channel a lead came from), `lib/event-log.ts` (best-effort audit rows on the Events tab).
 - `api/lead-email.ts`: corrects the email of a lead whose domain has no mail server (see "Email check"). `lib/email-domain.ts` (the MX lookup), `lib/email-sheet.ts` (the guarded Sheet update), `lib/fix-token.ts` (the correction credential), `lib/http.ts` (request helpers shared by the two lead endpoints).
@@ -36,6 +37,10 @@ npm run dev         # vercel dev: serves the page and /api/lead
 | `EVENTS_TAB` | no | defaults to `Events`; the audit-log tab, see "Events tab" |
 | `TURNSTILE_SECRET_KEY` | no | set together with `TURNSTILE_SITE_KEY` in `js/config.js` |
 | `CAL_WEBHOOK_SECRET` | for `/api/cal-webhook` | the secret typed into the Cal.com webhook; without it the endpoint returns 500 |
+| `ALERT_SMTP_PASS` | no | the Zoho app password of the alert mailbox; setting it turns failure alerts on, see "Failure alerts". Unset: alerts are off and the site works as before |
+| `ALERT_SMTP_USER` | no | the mailbox that sends the alerts; defaults to `consulting@tridha.net` |
+| `ALERT_TO` | no | who receives them, comma-separated; defaults to `ALERT_SMTP_USER` |
+| `ALERT_SMTP_HOST` | no | defaults to `smtp.zoho.in` (port 465, implicit TLS); `smtp.zoho.com` for an account on the .com data centre |
 | `CALENDAR_ID`, `CALENDAR_CHANNEL_TOKEN`, `CRON_SECRET` | for the calendar sync | see "Google Calendar declines". `CRON_SECRET` also keys the `fixToken` of the email correction (see "Email check") |
 
 ### Lead rate limit
@@ -108,6 +113,21 @@ Cal.com puts each booking on `consulting@` as a Google Calendar event and invite
 - **How it runs.** `vercel.json` schedules `/api/calendar-cron` for 00:30 UTC (06:00 IST). Vercel runs Hobby crons once a day, at some point within the scheduled hour. It sweeps events from yesterday to 90 days ahead, then opens a new push channel with a 2-day lifetime pointing at `https://$VERCEL_PROJECT_PRODUCTION_URL/api/calendar-notify`. A channel is opened every day, so they overlap; channels are not stored or stopped, and duplicate notifications are harmless because the sync is idempotent. Google then posts to `/api/calendar-notify` whenever the calendar changes, and that re-reads the events updated in the last 48 hours, so a decline usually lands within a few minutes. The sweep and the channel renewal are independent: if one fails the other still runs and the cron answers 500.
 - **Worst case.** If push delivery fails (a channel that did not open, or notifications that never arrive), a decline appears at the next daily sweep, up to about a day later. A decline on an event more than 90 days away is picked up once its date comes within the window.
 - **Setup check.** After setting the three variables and deploying, call the cron once by hand: `curl -H "Authorization: Bearer $CRON_SECRET" https://consulting.tridha.net/api/calendar-cron`. It answers `{"ok":true,"swept":N,"changed":N,"channelExpiresAt":"..."}`.
+
+## Failure alerts
+
+Vercel's Hobby plan keeps function logs for about an hour, so a lead that fails to save at night would be gone from the logs by morning. When something below fails, the function also emails the team through the Zoho mailbox. Every failure is still logged exactly as before; the email is in addition, and the HTTP answer of the endpoint never changes.
+
+- **What alerts.**
+  - A lead that is not saved: `LEAD_WRITE_FAILED` and `LEAD_SINK_MISCONFIGURED` from `/api/lead`. The mail carries every field of the lead, so it can be entered into the Sheet by hand. When only some sinks fail, one mail lists the failed ones.
+  - `CAL_WEBHOOK_WRITE_FAILED` and `CAL_WEBHOOK_MISCONFIGURED` (the missing secret, the missing Sheet variables and a wrong header row), and `CAL_WEBHOOK_BAD_PAYLOAD` for a signed body only. The mail carries the trigger and the payload.
+  - `LEAD_EMAIL_WRITE_FAILED` and `LEAD_EMAIL_MISCONFIGURED` (Sheet variables or header row) from `/api/lead-email`: a corrected address that was not written.
+  - `CALENDAR_CRON_MISCONFIGURED`, `CALENDAR_SWEEP_FAILED` and `CALENDAR_WATCH_RENEW_FAILED` from the daily cron, and `CALENDAR_NOTIFY_MISCONFIGURED` from `/api/calendar-notify`. Without a renewed push channel, declines stop syncing within two days.
+- **What deliberately does not.** Anything a stranger can trigger by sending requests: `LEAD_RATE_LIMITED`, a rejected or unreachable captcha, validation errors, `CAL_WEBHOOK_BAD_SIGNATURE`, `CAL_WEBHOOK_TOO_LARGE`, `CALENDAR_CRON_UNAUTHORIZED`, `CALENDAR_NOTIFY_BAD_TOKEN`, and the `/api/lead-email` token and `CRON_SECRET` checks. Also `LEAD_DEDUPE_CHECK_FAILED`, `LEAD_ID_CONFLICT`, `LEAD_FIX_TOKEN_UNAVAILABLE`, `CALENDAR_NOTIFY_FAILED` (Google retries and the daily sweep covers it) and `EVENT_LOG_WRITE_FAILED`: the lead or booking itself is safe. The three misconfiguration alerts that run before a secret is checked (`CAL_WEBHOOK_SECRET` missing, `CALENDAR_NOTIFY_MISCONFIGURED`, and the cron's) can be reached without credentials, so the throttle below bounds them to one mail per ten minutes per server instance.
+- **Throttle.** A server instance sends at most one mail per ten minutes for the same alert key. A lost lead is keyed by its lead id, so every distinct lead alerts; a Cal.com retry of the same booking and trigger, and a repeating misconfiguration, are suppressed. The throttle lives in memory, so a new instance may mail again.
+- **Mail.** Plain text, subject prefixed `[consulting.tridha.net]`, the time in IST, the error message and the details as JSON (cut at 60 KB). The send gives up after 6 seconds, and a failed send is logged as `ALERT_SEND_FAILED` (nothing else changes). With no password set, `ALERT_NOT_CONFIGURED` is logged instead.
+- **Create the app password.** Sign in to Zoho Accounts (accounts.zoho.in, or accounts.zoho.com on the .com data centre) as the mailbox owner, then Security, App Passwords, Generate New Password, name it `consulting.tridha.net alerts`. Copy the password once; it is not shown again. An account on the .com data centre sets `ALERT_SMTP_HOST=smtp.zoho.com`.
+- **Rollout.** In Vercel, Project, Settings, Environment Variables, add `ALERT_SMTP_PASS` (Production) and redeploy. The other three are only needed to change a default. Then check delivery with `ALERT_SMTP_PASS=<the app password> npx tsx scripts/test-alert.ts`, which sends one mail labelled as a test and prints only whether the server accepted it. Never commit the password.
 
 ## Hero video
 

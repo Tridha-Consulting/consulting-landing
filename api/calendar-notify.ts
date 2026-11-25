@@ -1,3 +1,4 @@
+import { sendAlert } from '../lib/alert.js';
 import { SheetLayoutError } from '../lib/columns.js';
 import { safeEqual } from '../lib/safe-equal.js';
 
@@ -18,7 +19,16 @@ export async function POST(request: Request): Promise<Response> {
     ({ calendarEnv } = await import('../lib/calendar-env.js'));
     ({ syncFromCalendar } = await import('../lib/calendar-sync.js'));
   } catch (err) {
-    console.error(JSON.stringify({ event: 'CALENDAR_NOTIFY_MISCONFIGURED', error: err instanceof Error ? err.message : String(err) }));
+    const error = err instanceof Error ? err.message : String(err);
+    console.error(JSON.stringify({ event: 'CALENDAR_NOTIFY_MISCONFIGURED', error }));
+    // Reachable without the channel token, so the alert is throttled to one per window instead of one per request.
+    await sendAlert({
+      event: 'CALENDAR_NOTIFY_MISCONFIGURED',
+      subject: 'Calendar push endpoint cannot run: settings missing',
+      summary: 'Google Calendar push notifications are answered with a 500, so booker declines are not synced to the Sheet except by the daily sweep.',
+      error,
+      dedupeKey: 'misconfigured',
+    });
     return json(500, { ok: false, error: 'server_misconfigured' });
   }
 

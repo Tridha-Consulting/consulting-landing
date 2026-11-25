@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { sendAlert } from '../lib/alert.js';
 import { SheetLayoutError } from '../lib/columns.js';
 import { EMAIL_CHECK, checkEmailDomain } from '../lib/email-domain.js';
 import { EVENT_LOG_DEADLINE_MS, logEvents } from '../lib/event-log.js';
@@ -50,7 +51,16 @@ export async function POST(request: Request): Promise<Response> {
     ({ correctLeadEmail } = await import('../lib/email-sheet.js'));
   } catch (err) {
     // Missing Sheet env fails module load. The correction is logged: Vercel logs are the recovery path.
-    console.error(JSON.stringify({ event: 'LEAD_EMAIL_MISCONFIGURED', error: err instanceof Error ? err.message : String(err), leadId, email }));
+    const error = err instanceof Error ? err.message : String(err);
+    console.error(JSON.stringify({ event: 'LEAD_EMAIL_MISCONFIGURED', error, leadId, email }));
+    await sendAlert({
+      event: 'LEAD_EMAIL_MISCONFIGURED',
+      subject: 'Corrected lead email NOT saved: server misconfigured',
+      summary: 'A visitor corrected the email on their lead, but the Sheet is not configured, so the correction was NOT written. Update the Email cell of the lead below by hand.',
+      error,
+      details: { leadId, email },
+      dedupeKey: leadId,
+    });
     return json(500, { ok: false, error: 'server_misconfigured' });
   }
 
@@ -72,10 +82,26 @@ export async function POST(request: Request): Promise<Response> {
     if (err instanceof SheetLayoutError) {
       // Nothing was written, and retrying cannot help until the header row is fixed.
       console.error(JSON.stringify({ event: 'LEAD_EMAIL_MISCONFIGURED', error, leadId, email }));
+      await sendAlert({
+        event: 'LEAD_EMAIL_MISCONFIGURED',
+        subject: 'Corrected lead email NOT saved: Sheet header row is wrong',
+        summary: 'A visitor corrected the email on their lead, but the Sheet header row differs from the one the code expects, so the correction was NOT written. Update the Email cell of the lead below by hand.',
+        error,
+        details: { leadId, email },
+        dedupeKey: leadId,
+      });
       return json(500, { ok: false, error: 'server_misconfigured' });
     }
     // The attempted correction is logged on purpose, like LEAD_WRITE_FAILED: the logs are the recovery path.
     console.error(JSON.stringify({ event: 'LEAD_EMAIL_WRITE_FAILED', error, leadId, email }));
+    await sendAlert({
+      event: 'LEAD_EMAIL_WRITE_FAILED',
+      subject: 'Corrected lead email NOT saved',
+      summary: 'A visitor corrected the email on their lead, but writing it to the Sheet failed. Update the Email cell of the lead below by hand if the visitor does not retry.',
+      error,
+      details: { leadId, email },
+      dedupeKey: leadId,
+    });
     return json(502, { ok: false, error: 'write_failed' });
   }
 }

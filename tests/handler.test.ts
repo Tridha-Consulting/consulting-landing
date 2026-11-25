@@ -3,8 +3,10 @@ import * as lead from '../api/lead.js';
 import { columnIndex, toRow } from '../lib/columns.js';
 import { fixTokenFor } from '../lib/fix-token.js';
 import { resetLeadRateLimit } from '../lib/rate-limit.js';
-import { BOTTLENECK_OPTIONS } from '../lib/schema.js';
+import { resetAlertThrottle } from '../lib/alert.js';
+import { BOTTLENECK_OPTIONS, BUDGET_OPTIONS, DECISION_MAKER_OPTIONS, REVENUE_OPTIONS, TECH_TEAM_OPTIONS, TIMELINE_OPTIONS } from '../lib/schema.js';
 import { makeRequest, readJsonResponse, validBody } from './helpers.js';
+import { mail, sentMail } from './mail-fake.js';
 
 const write = vi.fn();
 vi.mock('../lib/sinks/index.js', () => ({ sinks: [{ name: 'test', write: (l: unknown) => write(l) }] }));
@@ -421,5 +423,104 @@ describe('POST /api/lead fixToken', () => {
     expect(out.body).toEqual({ ok: true, leadId: expect.any(String), emailOk: false });
     expect(write).toHaveBeenCalledTimes(1);
     expect(loggedEvent(errSpy, 'LEAD_FIX_TOKEN_UNAVAILABLE')).toMatchObject({ leadId: (out.body as { leadId: string }).leadId });
+  });
+});
+
+describe('failure alerts', () => {
+  beforeEach(() => {
+    vi.stubEnv('ALERT_SMTP_PASS', 'app-password-placeholder');
+    resetAlertThrottle();
+  });
+
+  it('a lost lead mails every field of the lead, and the response is unchanged', async () => {
+    write.mockRejectedValue(new Error('sheets down'));
+    const out = await call('POST', { ...validBody, utmSource: 'meta' }, { 'x-forwarded-for': '203.0.113.9', 'user-agent': 'UA/1' });
+    expect(out.statusCode).toBe(502);
+    expect(out.body).toEqual({ ok: false, error: 'write_failed' });
+    expect(loggedEvent(errSpy, 'LEAD_WRITE_FAILED')).toMatchObject({ error: 'sheets down' });
+
+    const [mailed] = sentMail();
+    expect(sentMail()).toHaveLength(1);
+    expect(mailed!.subject).toBe('[consulting.tridha.net] Lead NOT saved: Asha Rao (Rao Textiles)');
+    for (const value of [
+      'Asha Rao',
+      'asha@example.com',
+      '+919812345678',
+      'Founder',
+      'Rao Textiles',
+      'raotextiles.in',
+      REVENUE_OPTIONS[1],
+      BUDGET_OPTIONS[2],
+      BOTTLENECK_OPTIONS[0],
+      BOTTLENECK_OPTIONS[3],
+      TECH_TEAM_OPTIONS[1],
+      TIMELINE_OPTIONS[0],
+      DECISION_MAKER_OPTIONS[0],
+      'meta',
+      '203.0.113.9',
+      'UA/1',
+      'sheets down',
+    ]) {
+      expect(mailed!.text, value).toContain(JSON.stringify(value).slice(1, -1));
+    }
+    expect(mailed!.text).toMatch(/"leadId": "[0-9a-f-]{36}"/);
+  });
+
+  it('mails each distinct lost lead, even in quick succession', async () => {
+    write.mockRejectedValue(new Error('sheets down'));
+    await call('POST', validBody);
+    await call('POST', validBody);
+    expect(sentMail()).toHaveLength(2);
+  });
+
+  it('a mail that cannot be sent changes nothing in the response', async () => {
+    write.mockRejectedValue(new Error('sheets down'));
+    mail.sendMail.mockRejectedValue(new Error('smtp down'));
+    const out = await call('POST', validBody);
+    expect(out.statusCode).toBe(502);
+    expect(out.body).toEqual({ ok: false, error: 'write_failed' });
+    expect(loggedEvent(errSpy, 'ALERT_SEND_FAILED')).toMatchObject({ alertEvent: 'LEAD_WRITE_FAILED', error: 'smtp down' });
+  });
+
+  it('a saved lead sends no mail', async () => {
+    expect((await call('POST', validBody)).statusCode).toBe(200);
+    expect(mail.createTransport).not.toHaveBeenCalled();
+  });
+
+  it('an unconfigured mailbox changes nothing in the response and logs ALERT_NOT_CONFIGURED', async () => {
+    vi.stubEnv('ALERT_SMTP_PASS', '');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    write.mockRejectedValue(new Error('sheets down'));
+    const out = await call('POST', validBody);
+    expect(out.statusCode).toBe(502);
+    expect(out.body).toEqual({ ok: false, error: 'write_failed' });
+    expect(loggedEvent(warn, 'ALERT_NOT_CONFIGURED')).toMatchObject({ alertEvent: 'LEAD_WRITE_FAILED' });
+    expect(mail.createTransport).not.toHaveBeenCalled();
+  });
+
+  it('a rate-limited lead sends no mail', async () => {
+    const ipA = { 'x-forwarded-for': '203.0.113.9' };
+    for (let i = 0; i < 5; i++) await call('POST', validBody, ipA);
+    const out = await call('POST', validBody, ipA);
+    expect(out.statusCode).toBe(429);
+    expect(mail.createTransport).not.toHaveBeenCalled();
+  });
+
+  it('a rejected captcha, an unreachable captcha, and a validation error send no mail', async () => {
+    vi.stubEnv('TURNSTILE_SECRET_KEY', 'secret');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ success: false }) }));
+    expect((await call('POST', { ...validBody, turnstileToken: 'bad' })).statusCode).toBe(400);
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')));
+    expect((await call('POST', { ...validBody, turnstileToken: 'tok' })).statusCode).toBe(502);
+    vi.stubEnv('TURNSTILE_SECRET_KEY', '');
+    expect((await call('POST', { ...validBody, budget: undefined })).statusCode).toBe(400);
+    expect(mail.createTransport).not.toHaveBeenCalled();
+  });
+
+  it('a missing CRON_SECRET (no fix token) sends no mail', async () => {
+    vi.stubEnv('CRON_SECRET', '');
+    checkEmailDomain.mockResolvedValue('No mail server');
+    expect((await call('POST', validBody)).statusCode).toBe(200);
+    expect(mail.createTransport).not.toHaveBeenCalled();
   });
 });
